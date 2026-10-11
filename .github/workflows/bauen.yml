@@ -1,0 +1,52 @@
+# Baut die Signier-Werkzeug.exe unter Windows, sobald ein Tag v<Version>
+# gesetzt wird, und legt sie als ENTWURF eines Releases ab. Veröffentlicht
+# (und damit für Updates sichtbar) wird erst, wenn der Herausgeber den
+# Entwurf im Signier-Werkzeug mit seinem Schlüssel signiert hat.
+name: Bauen
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  bauen:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+
+      - name: Tag und VERSION im Quelltext müssen übereinstimmen
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path signier_werkzeug.py -Pattern '^VERSION = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$v" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} passt nicht zu VERSION $v im Quelltext" }
+
+      - name: Pakete (feste Versionen mit Prüfsummen)
+        run: python -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r bau-anforderungen.txt
+
+      - name: Bauen
+        run: python -m PyInstaller --noconfirm --onefile --noconsole --name Signier-Werkzeug --icon signier.ico --hidden-import cryptography.hazmat.primitives.asymmetric.ed25519 signier_werkzeug.py
+
+      - name: Selbsttest der exe
+        shell: pwsh
+        run: |
+          Start-Process -Wait -FilePath dist\Signier-Werkzeug.exe -ArgumentList '--selbsttest', "$PWD\selbst.txt"
+          $t = Get-Content selbst.txt
+          Write-Host $t
+          if (-not $t.StartsWith('OK')) { throw 'Selbsttest fehlgeschlagen' }
+
+      - name: Entwurf anlegen
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $h = (Get-FileHash dist\Signier-Werkzeug.exe -Algorithm SHA256).Hash.ToLower()
+          $n = "Ungeprüfter Entwurf aus Commit ${{ github.sha }}.`n`nSHA-256 der exe: $h`n`nWird erst sichtbar, wenn er im Signier-Werkzeug signiert und veröffentlicht wurde."
+          gh release create "${{ github.ref_name }}" dist/Signier-Werkzeug.exe --draft --title "Signier-Werkzeug ${{ github.ref_name }}" --notes "$n"
