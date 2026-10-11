@@ -764,6 +764,85 @@ class HerkunftTests(unittest.TestCase):
             self.pruefen({"tag_name": "v9.9.9", "body": "irgendwas", "assets": []})
 
 
+class ReleaseTextTests(unittest.TestCase):
+    def test_text_nach_veroeffentlichung(self):
+        t = W.veroeffentlicht_text("9.9.9", "e" * 40, "a" * 64, "https://github.com/x/y/actions/runs/1")
+        self.assertNotIn("Ungeprüfter Entwurf", t)
+        self.assertIn("signiert und veröffentlicht", t)
+        self.assertIn(W.WERKZEUG_SCHLUESSEL, t)
+        import re
+        self.assertEqual(re.search(r"Commit ([0-9a-f]{40})", t).group(1), "e" * 40)   # weiter maschinell prüfbar
+        self.assertEqual(re.search(r"SHA-256 der exe: ([0-9a-f]{64})", t).group(1), "a" * 64)
+
+    def test_veroeffentlichen_ersetzt_text(self):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        privat = Ed25519PrivateKey.generate()
+        exe = b"MZ" + b"\0" * (W._EXE_MIN)
+        summe = hashlib.sha256(exe).hexdigest()
+        rel = {"id": 7, "tag_name": "v9.9.9", "assets": [{"id": 1, "name": W.EXE_NAME, "url": "u"}],
+               "body": f"Ungeprüfter Entwurf aus Commit {'e' * 40}.\n\nSHA-256 der exe: {summe}\n\n"
+                       "Gebaut von: https://github.com/Hansi478/Signier-Werkzeug/actions/runs/123\n"}
+        aufrufe = []
+        with mock.patch.object(W, "privat_laden", return_value=privat), \
+                mock.patch.object(W, "WERKZEUG_SCHLUESSEL", W.oeffentlich_text(privat)), \
+                mock.patch.object(W, "werkzeug_entwurf", return_value=rel), \
+                mock.patch.object(W, "_herunterladen", return_value=exe), \
+                mock.patch.object(W, "entwurf_herkunft", return_value="e" * 40), \
+                mock.patch.object(W, "_gh_hochladen"), \
+                mock.patch.object(W, "_gh", side_effect=lambda *a, **k: aufrufe.append((a, k)) or {}):
+            W.werkzeug_veroeffentlichen({"id": "abcdef12"}, "x", "t")
+        patch = [a for a, k in aufrufe if len(a) > 2 and a[2] == "PATCH"][0][3]
+        self.assertFalse(patch["draft"])
+        self.assertIn("signiert und veröffentlicht", patch["body"])
+        self.assertIn("actions/runs/123", patch["body"])
+        self.assertIn(summe, patch["body"])
+
+
+class BauStatusTests(unittest.TestCase):
+    def status(self, laeufe, jobs=None, entwurf=None, token="t", fehler_ohne_token=False):
+        def gh(pfad, tok, *a, **k):
+            if fehler_ohne_token and tok is None:
+                raise ValueError("Keine Berechtigung")
+            if "/workflows/bauen.yml/runs" in pfad:
+                return {"workflow_runs": laeufe}
+            if pfad.endswith("/jobs"):
+                return {"jobs": jobs or []}
+            raise ValueError("404")
+        with mock.patch.object(W, "_gh", gh), \
+                mock.patch.object(W, "werkzeug_entwurf", side_effect=(lambda t: entwurf) if entwurf else ValueError("kein Entwurf")):
+            return W.werkzeug_bau_status(token)
+
+    URL = "https://github.com/Hansi478/Signier-Werkzeug/actions/runs/5"   # Schreibweise wie von GitHub geliefert
+
+    def test_laeuft_mit_schritt(self):
+        d = self.status([{"id": 5, "head_branch": "v9.9.9", "status": "in_progress", "html_url": self.URL}],
+                        jobs=[{"name": "bauen", "steps": [{"name": "Tests", "status": "completed"},
+                                                          {"name": "Bauen", "status": "in_progress"}]}])
+        self.assertEqual((d["zustand"], d["tag"], d["schritt"], d["url"]), ("laeuft", "v9.9.9", "bauen: Bauen", self.URL))
+
+    def test_fertig_mit_entwurf(self):
+        d = self.status([{"id": 5, "head_branch": "v9.9.9", "status": "completed", "conclusion": "success", "html_url": self.URL}],
+                        entwurf={"tag_name": "v9.9.9"})
+        self.assertEqual((d["zustand"], d["entwurf"]), ("fertig", True))
+
+    def test_fehlgeschlagen_und_keiner(self):
+        d = self.status([{"id": 5, "head_branch": "v9.9.9", "status": "completed", "conclusion": "failure", "html_url": self.URL}])
+        self.assertEqual(d["zustand"], "fehlgeschlagen")
+        self.assertEqual(self.status([{"id": 1, "head_branch": "main", "status": "completed"}])["zustand"], "keiner")
+
+    def test_fremde_adresse_wird_nicht_verlinkt(self):
+        for boese in ("https://boese.example/x", "https://github.com/Hansi478/Signier-Werkzeug/actions/runs/5/../../x",
+                      "javascript:alert(1)", "https://github.com/andere/repo/actions/runs/5"):
+            d = self.status([{"id": 5, "head_branch": "v9.9.9", "status": "queued", "html_url": boese}])
+            self.assertEqual((d["zustand"], d["url"]), ("wartet", ""), boese)
+
+    def test_rueckfall_mit_token(self):
+        d = self.status([{"id": 5, "head_branch": "v9.9.9", "status": "queued", "html_url": self.URL}], fehler_ohne_token=True)
+        self.assertEqual(d["zustand"], "wartet")
+        with self.assertRaises(ValueError):
+            self.status([], token="", fehler_ohne_token=True)
+
+
 class WorkflowTests(unittest.TestCase):
     def lesen(self, name):
         with open(os.path.join(WURZEL, ".github", "workflows", name), encoding="utf-8") as f:

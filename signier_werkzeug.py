@@ -1094,6 +1094,24 @@ def entwurf_herkunft(rel, token, exe):
     return commit
 
 
+def veroeffentlicht_text(version, commit, summe, lauf=""):
+    """Release-Text nach dem Signieren (ersetzt „Ungeprüfter Entwurf …“).
+    Behält „Commit <sha>“ und „SHA-256 der exe: <summe>“ bei, damit die
+    Herkunft weiterhin maschinell prüfbar bleibt."""
+    fp = hashlib.sha256(base64.b64decode(WERKZEUG_SCHLUESSEL)).hexdigest().upper()
+    zeilen = [f"Signier-Werkzeug {version} - signiert und veröffentlicht am "
+              f"{time.strftime('%d.%m.%Y %H:%M UTC', time.gmtime())} mit dem Schlüssel des Herausgebers.", "",
+              f"Gebaut aus Commit {commit}.", "", f"SHA-256 der exe: {summe}", "",
+              f"Signatur: {SIGNATUR_DATEI} (Format {FORMAT}, Ed25519)", "",
+              f"Öffentlicher Schlüssel: {WERKZEUG_SCHLUESSEL}",
+              "Fingerabdruck: " + " ".join(fp[i:i + 4] for i in range(0, 64, 4)), ""]
+    if lauf:
+        zeilen += [f"Gebaut von: {lauf}", ""]
+    zeilen += ["Prüfen: SHA-256 der exe vergleichen, Fingerabdruck über einen zweiten Weg beim Herausgeber bestätigen, "
+               "Herkunft mit „gh attestation verify Signier-Werkzeug.exe --repo " + WERKZEUG_REPO + "“."]
+    return "\n".join(zeilen) + "\n"
+
+
 def werkzeug_veroeffentlichen(profil, kennwort, token):
     """Entwurf laden, Herkunft prüfen, signieren, SIGNATUR.json anhängen, veröffentlichen."""
     privat = privat_laden(schluessel_pfad(profil), kennwort)
@@ -1110,8 +1128,53 @@ def werkzeug_veroeffentlichen(profil, kennwort, token):
     if alt:
         _gh(f"/repos/{WERKZEUG_REPO}/releases/assets/{int(alt['id'])}", token, "DELETE", roh=True)
     _gh_hochladen(rel["id"], SIGNATUR_DATEI, inhalt.encode("utf-8"), token)
-    _gh(f"/repos/{WERKZEUG_REPO}/releases/{int(rel['id'])}", token, "PATCH", {"draft": False, "make_latest": "true"})
-    return version, hashlib.sha256(exe).hexdigest(), commit
+    summe = hashlib.sha256(exe).hexdigest()
+    m_lauf = re.search(r"Gebaut von: (https://github\.com/[\w./-]+/actions/runs/\d+)", str(rel.get("body") or ""))
+    _gh(f"/repos/{WERKZEUG_REPO}/releases/{int(rel['id'])}", token, "PATCH",
+        {"draft": False, "make_latest": "true", "body": veroeffentlicht_text(version, commit, summe, m_lauf.group(1) if m_lauf else "")})
+    return version, summe, commit
+
+
+def werkzeug_bau_status(token=None):
+    """Stand des letzten Laufs „Bauen“ (Tag-Push) -> {"tag", "zustand", "schritt", "url", "entwurf"}.
+    zustand: "wartet", "laeuft", "fertig", "fehlgeschlagen" oder "keiner". Nur lesende Abfragen;
+    das Repository ist öffentlich, daher zuerst ohne Token (ein Token ohne „Actions: Read“ würde abgewiesen)."""
+    def lesen(pfad):
+        try:
+            return _gh(pfad, None, timeout=20)
+        except ValueError:
+            if not token:
+                raise
+            return _gh(pfad, token, timeout=20)
+    laeufe = (lesen(f"/repos/{WERKZEUG_REPO}/actions/workflows/bauen.yml/runs?event=push&per_page=5") or {}).get("workflow_runs") or []
+    lauf = next((r for r in laeufe if _version_tupel(str(r.get("head_branch") or "").lstrip("v"))), None)
+    if not lauf:
+        return {"zustand": "keiner", "tag": "", "schritt": "", "url": "", "entwurf": False}
+    url = str(lauf.get("html_url") or "")
+    if not re.fullmatch(rf"https://github\.com/{re.escape(WERKZEUG_REPO)}/actions/runs/\d+", url, re.I):
+        url = ""
+    status, ergebnis, schritt = lauf.get("status"), lauf.get("conclusion"), ""
+    if status != "completed":
+        zustand = "wartet" if status in ("queued", "waiting", "requested", "pending") else "laeuft"
+        try:
+            jobs = (lesen(f"/repos/{WERKZEUG_REPO}/actions/runs/{int(lauf['id'])}/jobs") or {}).get("jobs") or []
+            for job in jobs:
+                aktiv = next((st for st in job.get("steps") or [] if st.get("status") == "in_progress"), None)
+                if aktiv:
+                    schritt = f"{job.get('name')}: {aktiv.get('name')}"[:120]
+                    break
+        except (ValueError, KeyError, TypeError):
+            pass
+    else:
+        zustand = "fertig" if ergebnis == "success" else "fehlgeschlagen"
+    entwurf = False
+    if zustand == "fertig" and token:
+        try:
+            entwurf = werkzeug_entwurf(token).get("tag_name") == lauf.get("head_branch")
+        except ValueError:
+            entwurf = False
+    return {"zustand": zustand, "tag": str(lauf.get("head_branch") or "")[:40], "schritt": schritt, "url": url,
+            "entwurf": entwurf}
 
 
 def werkzeug_neueste():
@@ -1341,7 +1404,7 @@ def aktion(name, p):
                 raise ValueError("Kein Profil mit dem Schlüssel des Herausgebers (" + WERKZEUG_SCHLUESSEL[:8] + "…) gefunden.")
             pr = dict(pr)
         else:
-            pr = _profil(d, p.get("id")) if name not in ("update_suchen", "update_einspielen", "werkzeug_bau_starten") else None
+            pr = _profil(d, p.get("id")) if name not in ("update_suchen", "update_einspielen", "werkzeug_bau_starten", "werkzeug_bau_status") else None
         token = geheim_lesen(d.get("github_token"))
     if name == "update_suchen":
         version, _rel = werkzeug_neueste()
@@ -1358,6 +1421,8 @@ def aktion(name, p):
         version, stand = werkzeug_bau_starten(token)
         return {"ok": True, "meldung": f"Tag v{version} auf {stand[:7]} gesetzt. GitHub baut jetzt unter „Actions“ "
                                        "(einige Minuten), danach hier „Neuen Entwurf signieren und veröffentlichen“."}
+    if name == "werkzeug_bau_status":
+        return werkzeug_bau_status(token)
     if name == "werkzeug_veroeffentlichen":
         if not token:
             raise ValueError("Zum Veröffentlichen wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
@@ -1603,7 +1668,7 @@ button.zweit{background:transparent;color:var(--text);border-color:var(--rand)}b
 .profil{display:flex;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--rand)}.profil:first-of-type{border-top:0}
 .profil b{flex:1}.marke{font-size:12px;padding:2px 8px;border-radius:99px;border:1px solid var(--rand);color:var(--leise)}
 .marke.gut{border-color:var(--ok);color:var(--ok)}.marke.schlecht{border-color:var(--warn);color:var(--warn)}
-.versteckt{display:none !important}ul{margin:6px 0 0 18px;padding:0}
+.versteckt{display:none !important}button.hervor{box-shadow:0 0 0 3px var(--ok)}.status a{color:#93c5fd}ul{margin:6px 0 0 18px;padding:0}
 </style></head><body>
 <header><h1>🔏 Signier-Werkzeug</h1><div class="rechts"><button id="update-knopf" class="versteckt">Update</button>
 Version __VERSION__ <button class="zweit" id="beenden">Beenden</button></div></header>
@@ -1679,6 +1744,7 @@ Version __VERSION__ <button class="zweit" id="beenden">Beenden</button></div></h
   hier „Bau starten“ (setzt den Tag, z. B. <span class="mono">v1.2.1</span>), warten, bis GitHub unter „Actions“ fertig gebaut hat, dann hier signieren. Erst danach sehen andere Installationen das Update.</div>
   <div class="zeile" style="margin-top:10px"><button class="zweit" id="w-suchen">Nach Update suchen</button>
   <button class="zweit" id="w-bauen">Bau starten (Tag setzen)</button>
+  <button class="zweit" id="w-baustatus">Bau-Status prüfen</button>
   <button id="w-veroeff">Neuen Entwurf signieren und veröffentlichen</button></div>
   <div class="status" id="w-status"></div></div>
 </section>
@@ -1846,16 +1912,36 @@ $("w-suchen").onclick = e => mit("w-status", e.target, "Frage GitHub …", async
   const d = await api("update_suchen"); updateZeigen(d);
   status("w-status", "ok", d.neuer ? `✅ Version ${esc(d.version)} ist verfügbar – oben auf „Update auf ${esc(d.version)}“ klicken.`
     : `✅ Aktuell (Version ${esc(d.aktuell)}${d.version ? ", neueste veröffentlichte " + esc(d.version) : ", noch nichts veröffentlicht"}).`); });
+let bauTimer = null, bauBis = 0;
+function bauZeigen(d) {
+  const link = d.url ? ` <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Lauf öffnen</a>` : "";
+  $("w-veroeff").classList.toggle("hervor", d.zustand === "fertig" && d.entwurf);
+  if (d.zustand === "keiner") return status("w-status", "laeuft", "Noch kein Bau gefunden.");
+  if (d.zustand === "wartet") return status("w-status", "laeuft", `⏳ Bau ${esc(d.tag)} wartet auf einen Rechner bei GitHub …` + link);
+  if (d.zustand === "laeuft") return status("w-status", "laeuft", `⏳ Bau ${esc(d.tag)} läuft${d.schritt ? " - " + esc(d.schritt) : ""} …` + link);
+  if (d.zustand === "fehlgeschlagen") return status("w-status", "fehler", `❌ Bau ${esc(d.tag)} fehlgeschlagen.` + link);
+  status("w-status", "ok", `✅ Bau ${esc(d.tag)} fertig` + (d.entwurf ? " - der Entwurf ist bereit: jetzt „Neuen Entwurf signieren und veröffentlichen“."
+    : " (Entwurf nicht gefunden - ist er schon veröffentlicht oder fehlt ein Token?).") + link);
+}
+async function bauAbfragen() {
+  try { const d = await api("werkzeug_bau_status"); bauZeigen(d);
+    if (["fertig", "fehlgeschlagen"].includes(d.zustand) || Date.now() > bauBis) { clearInterval(bauTimer); bauTimer = null; }
+  } catch (e) { status("w-status", "fehler", "❌ " + esc(e.message)); clearInterval(bauTimer); bauTimer = null; }
+}
+function bauBeobachten() { clearInterval(bauTimer); bauBis = Date.now() + 40 * 60 * 1000; bauTimer = setInterval(bauAbfragen, 20000); }
 $("w-bauen").onclick = e => {
   if (!confirm("Tag v<VERSION> auf den neuesten Stand von main setzen? Die Version kommt aus signier_werkzeug.py auf main. GitHub baut daraufhin den Entwurf.")) return;
   mit("w-status", e.target, "Setze Tag …", async () => {
-    const d = await api("werkzeug_bau_starten"); status("w-status", "ok", "✅ " + esc(d.meldung)); });
+    const d = await api("werkzeug_bau_starten"); status("w-status", "ok", "✅ " + esc(d.meldung) + " Der Fortschritt wird hier angezeigt.");
+    bauBeobachten(); setTimeout(bauAbfragen, 8000); });
 };
+$("w-baustatus").onclick = e => mit("w-status", e.target, "Frage GitHub …", async () => {
+  const d = await api("werkzeug_bau_status"); bauZeigen(d); if (["wartet", "laeuft"].includes(d.zustand)) bauBeobachten(); });
 $("w-veroeff").onclick = async e => {
   const kw = await kennwort("Neuesten Entwurf des Signier-Werkzeugs von GitHub laden, signieren und veröffentlichen (Schlüssel des Herausgebers).");
   if (kw === null) return;
   mit("w-status", e.target, "Lade Entwurf, signiere und veröffentliche …", async () => {
-    const d = await api("werkzeug_veroeffentlichen", {kennwort: kw}); status("w-status", "ok", "✅ " + esc(d.meldung)); });
+    const d = await api("werkzeug_veroeffentlichen", {kennwort: kw}); $("w-veroeff").classList.remove("hervor"); status("w-status", "ok", "✅ " + esc(d.meldung)); });
 };
 api("update_suchen").then(updateZeigen).catch(() => {});
 api("zustand").then(d => { Z = d; zeichnen(); if (!Z.profile.length) document.querySelector('[data-reiter="profile"]').click(); })

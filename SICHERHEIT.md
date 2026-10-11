@@ -236,6 +236,15 @@ unter Linux und Windows laufen, nur mit Leserechten.
 4. Die Signatur prüft das Werkzeug beim Update selbst, mit dem eingebauten
    Schlüssel.
 
+Beim Veröffentlichen ersetzt das Werkzeug den Entwurfstext („Ungeprüfter Entwurf …“)
+durch einen Text mit Zeitpunkt der Signatur, Commit, SHA-256 der exe, öffentlichem
+Schlüssel mit Fingerabdruck und Link zum Bau-Lauf. „Commit <sha>“ und „SHA-256 der exe:“
+bleiben darin erhalten und damit maschinell prüfbar.
+
+Den Fortschritt des Baus fragt das Werkzeug nur lesend über die Actions-API ab.
+Weil das Repository öffentlich ist, geschieht das zuerst ohne Token. Ein Link zum Lauf
+wird nur angezeigt, wenn er genau auf einen Lauf dieses Repositorys zeigt.
+
 Vor dem Signieren prüft das Werkzeug selbst:
 - Die exe im Entwurf hat die Prüfsumme aus dem Bau (Release-Text und
   GitHub-Digest).

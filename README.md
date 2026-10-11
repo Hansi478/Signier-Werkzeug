@@ -36,10 +36,12 @@ Schlüssel und ersetzt das Programm. Ohne gültige Signatur wird nichts verände
    diesen Stand (ein vorhandener Tag wird nie verschoben). Alternativ den Tag von Hand
    setzen (er muss auf `main` liegen). GitHub baut die exe unter „Actions“ (feste
    Paketversionen mit Prüfsummen, Sicherheitstests, Selbsttest, Herkunftsnachweis) und legt
-   sie als **Entwurf** ab.
+   sie als **Entwurf** ab. Das Werkzeug zeigt den Fortschritt an („Bau läuft – Schritt …“,
+   „Bau fertig – Entwurf bereit“); später jederzeit über „Bau-Status prüfen“.
 3. Im Signier-Werkzeug: Reiter „GitHub“ → „Neuen Entwurf signieren und veröffentlichen“
    → Kennwort. Das Werkzeug lädt die exe, prüft ihre Herkunft (Prüfsumme aus dem Bau, Tag
-   auf dem gebauten Commit, Commit auf `main`), signiert sie, hängt `SIGNATUR.json` an und
+   auf dem gebauten Commit, Commit auf `main`), signiert sie, hängt `SIGNATUR.json` an,
+   ersetzt den Text „Ungeprüfter Entwurf“ durch Zeitpunkt, Commit, Prüfsumme und Schlüssel und
    veröffentlicht das Release. Erst jetzt sehen andere Installationen das Update.
 
 Empfohlen: im Repository unter Settings → Rules eine Tag-Regel für `v*` anlegen
