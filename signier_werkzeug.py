@@ -41,7 +41,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 PROGRAMM = "Signier-Werkzeug"
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 FORMAT = "sr-signatur-1"
 SIGNATUR_DATEI = "SIGNATUR.json"
 BINAER = (".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".otf")
