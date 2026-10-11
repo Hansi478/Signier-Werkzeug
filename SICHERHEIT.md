@@ -209,15 +209,26 @@ unter Linux und Windows laufen, nur mit Leserechten.
   Stand, bricht es ab, bevor etwas hochgeladen wird. Dann muss die Version
   erhöht werden.
 - „Bau starten“ setzt nur neue Tags.
-- **Bitte zusätzlich im Repository einstellen** (Settings → Rules →
-  Rulesets → New tag ruleset). Ziel `v*`, aktiviert:
-  - „Restrict updates“
-  - „Restrict deletions“
-  - „Block force pushes“
-
-  Optional unter Settings → General → Releases die Einstellung „Enable
-  release immutability“ aktivieren. Danach lassen sich veröffentlichte
-  Releases nicht mehr ändern.
+- **Im Repository eingestellt** (geprüft am 11.10.2026 über die öffentliche API):
+  - Tag-Ruleset „Protect version tags“ (Settings → Rules → Rulesets), aktiv für
+    `refs/tags/v*`: Ändern, Löschen und Force-Push verboten, keine Ausnahmen.
+    Neue Tags lassen sich weiter anlegen.
+  - „Release immutability“ (Settings → General → Releases) ist eingeschaltet.
+    Sie gilt für Releases, die nach dem Einschalten veröffentlicht werden;
+    v1.2.0 und v1.2.1 wurden davor veröffentlicht und bleiben änderbar.
+    Der Ablauf des Werkzeugs passt dazu: Der Bau legt einen (änderbaren)
+    Entwurf an; `SIGNATUR.json`, Text und „veröffentlicht“ kommen dazu, bevor
+    die Sperre greift.
+- Nachprüfen kann das jeder ohne Anmeldung:
+  ```
+  curl -s https://api.github.com/repos/Hansi478/Signier-Werkzeug/rulesets/24889762
+  curl -s https://api.github.com/repos/Hansi478/Signier-Werkzeug/immutable-releases
+  curl -s https://api.github.com/repos/Hansi478/Signier-Werkzeug/releases/latest | grep '"immutable"'
+  ```
+  Erwartet: `"enforcement": "active"` mit den Regeln `deletion`, `update`,
+  `non_fast_forward`; `"enabled": true`; ab dem nächsten Release `"immutable": true`.
+- Tags ohne „v“ fallen nicht unter das Ruleset; Versions-Tags heißen deshalb
+  immer `v<Version>`.
 
 ### Herkunft eines Releases prüfen (Empfänger)
 
@@ -262,6 +273,6 @@ auf Attestation, Prüfsumme und Signatur.
 - Das Paket `keyring` ist nicht Teil der Windows-exe, unter Windows wird
   ohnehin DPAPI verwendet. Wer den Quelltext unter macOS/Linux startet,
   installiert es bei Bedarf selbst (`pip install keyring`).
-- Die Tag-Regeln und die Unveränderlichkeit von Releases kann das Werkzeug
-  nicht selbst setzen. Das muss der Herausgeber in den Einstellungen des
-  Repositorys erledigen (Abschnitt 6).
+- Tag-Ruleset und Unveränderlichkeit von Releases sind Einstellungen des
+  Repositorys, nicht des Werkzeugs. Sie sind gesetzt (Abschnitt 6); wer sie
+  ändert, hebt den Schutz auf - deshalb mit den Befehlen dort gelegentlich nachprüfen.

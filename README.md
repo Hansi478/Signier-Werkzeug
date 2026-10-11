@@ -44,8 +44,9 @@ Schlüssel und ersetzt das Programm. Ohne gültige Signatur wird nichts verände
    ersetzt den Text „Ungeprüfter Entwurf“ durch Zeitpunkt, Commit, Prüfsumme und Schlüssel und
    veröffentlicht das Release. Erst jetzt sehen andere Installationen das Update.
 
-Empfohlen: im Repository unter Settings → Rules eine Tag-Regel für `v*` anlegen
-(Ändern und Löschen verbieten), siehe [SICHERHEIT.md](SICHERHEIT.md).
+Im Repository sind eine Tag-Regel für `v*` (Ändern, Löschen und Force-Push verboten) und
+„Release immutability“ eingeschaltet - veröffentlichte Versionen lassen sich nicht mehr
+verändern. Prüfbefehle: [SICHERHEIT.md](SICHERHEIT.md), Abschnitt 6.
 
 Das Token im Werkzeug braucht für dieses Repository „Contents: Read and write“.
 
