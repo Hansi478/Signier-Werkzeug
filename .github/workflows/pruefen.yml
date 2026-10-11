@@ -1,0 +1,42 @@
+# Sicherheitstests bei jedem Push und Pull Request - unter Linux und Windows
+# (Pfadregeln, ZIP-Import, Symlinks, Weiterleitungen, Token-Speicher).
+# Nur Leserechte, keine Secrets, kein pull_request_target.
+name: Pruefen
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Pakete (feste Versionen mit Prüfsummen)
+        if: runner.os == 'Windows'
+        run: "python -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r bau-anforderungen.txt"
+
+      - name: Paket cryptography
+        if: runner.os != 'Windows'
+        run: python -m pip install --disable-pip-version-check "cryptography==50.0.2"
+
+      - name: Tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Selbsttest (Quelltext)
+        run: python signier_werkzeug.py --selbsttest selbst.txt && python -c "import sys; t=open('selbst.txt', encoding='utf-8').read(); print(t); sys.exit(0 if t.startswith('OK') else 1)"

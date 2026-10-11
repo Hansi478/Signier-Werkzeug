@@ -11,29 +11,34 @@ Datei (Textdateien mit LF-Zeilenenden) und eine Ed25519-Signatur über
 {"format","version","dateien"} (JSON, sortiert, ohne Leerzeichen).
 
 Private Schlüssel liegen mit Kennwort verschlüsselt in
-%APPDATA%\\Signier-Werkzeug\\schluessel, das GitHub-Token mit Windows-DPAPI
-verschlüsselt (nur für diesen Windows-Benutzer lesbar).
+%APPDATA%\\Signier-Werkzeug\\schluessel. Das GitHub-Token: unter Windows mit
+DPAPI verschlüsselt (nur für diesen Windows-Benutzer lesbar), sonst im
+Schlüsselbund des Betriebssystems (Paket "keyring") oder - ohne sicheren
+Speicher - nur für die laufende Sitzung im Arbeitsspeicher (siehe SICHERHEIT.md).
 """
 import base64
 import fnmatch
 import hashlib
-import io
 import json
 import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
 import zipfile
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 PROGRAMM = "Signier-Werkzeug"
 VERSION = "1.2.0"
@@ -53,21 +58,219 @@ WERKZEUG_SCHLUESSEL = "7OhcbQl3LZIM488s+WIDQMr4YhQmGd4dgyxRgun5XAc="
 EXE_NAME = "Signier-Werkzeug.exe"
 _VERSION_RE = re.compile(r"^(\d{1,4})\.(\d{1,4})\.(\d{1,4})$")
 _EXE_MIN, _EXE_MAX = 5 * 1024 * 1024, 150 * 1024 * 1024
+MB = 1024 * 1024
+MAX_DATEI_LESEN = 512 * MB          # größte Datei, die signiert/geprüft wird
+MAX_SIGNATUR_BYTES = 4 * MB         # SIGNATUR.json (wie im Dashboard)
+_MAX_TIEFE = 64                     # Ordnertiefe beim Durchlaufen eines Bestands
 
 
 def daten_ordner():
     basis = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config")
     pfad = os.path.join(basis, PROGRAMM)
-    os.makedirs(os.path.join(pfad, "schluessel"), exist_ok=True)
+    os.makedirs(os.path.join(pfad, "schluessel"), mode=0o700, exist_ok=True)
+    if os.name != "nt":
+        for p in (pfad, os.path.join(pfad, "schluessel")):
+            try:
+                os.chmod(p, 0o700)
+            except OSError:
+                pass
     return pfad
 
 
 # ---------------------------------------------------------------------------
-# Dateiliste, Signieren, Prüfen
+# Sichere Dateizugriffe: keinen Verknüpfungen folgen, nur normale Dateien,
+# exklusiv angelegte Zufallsnamen, atomares Ersetzen
 # ---------------------------------------------------------------------------
+_O_BINAER = getattr(os, "O_BINARY", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_REPARSE_POINT = 0x400   # FILE_ATTRIBUTE_REPARSE_POINT (Windows: Symlinks, Junctions)
+
+
+def _art(st):
+    """Art eines Eintrags laut lstat: 'datei', 'ordner', 'verknuepfung' oder
+    'sonstiges' (FIFO, Socket, Gerät …)."""
+    if stat.S_ISLNK(st.st_mode) or getattr(st, "st_file_attributes", 0) & _REPARSE_POINT:
+        return "verknuepfung"
+    if stat.S_ISREG(st.st_mode):
+        return "datei"
+    if stat.S_ISDIR(st.st_mode):
+        return "ordner"
+    return "sonstiges"
+
+
+def regulaer_lesen(pfad, limit=MAX_DATEI_LESEN):
+    """Inhalt einer normalen Datei, ohne einer Verknüpfung zu folgen. Geprüft
+    vor dem Öffnen (lstat) und am geöffneten Deskriptor (fstat, dieselbe
+    Datei), damit ein Austausch dazwischen auffällt. O_NONBLOCK: eine
+    untergeschobene FIFO blockiert das Öffnen nicht."""
+    name = os.path.basename(pfad)
+    try:
+        vorher = os.lstat(pfad)
+    except FileNotFoundError:
+        raise
+    except OSError as e:
+        raise ValueError(f"{name} ist nicht lesbar ({e.__class__.__name__}).")
+    if _art(vorher) != "datei":
+        raise ValueError(f"{name} ist keine normale Datei (Verknüpfung oder Sondertyp) - abgelehnt.")
+    try:
+        fd = os.open(pfad, os.O_RDONLY | _O_BINAER | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC)
+    except OSError as e:
+        raise ValueError(f"{name} ist nicht lesbar ({e.__class__.__name__}).")
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != (vorher.st_dev, vorher.st_ino):
+            raise ValueError(f"{name} wurde während des Lesens ausgetauscht - abgelehnt.")
+        if st.st_size > limit:
+            raise ValueError(f"{name} ist zu groß.")
+        teile, n = [], 0
+        while True:
+            b = os.read(fd, MB)
+            if not b:
+                return b"".join(teile)
+            n += len(b)
+            if n > limit:
+                raise ValueError(f"{name} ist zu groß.")
+            teile.append(b)
+    finally:
+        os.close(fd)
+
+
+def _alles_schreiben(fd, daten):
+    ansicht = memoryview(daten)
+    while ansicht:
+        ansicht = ansicht[os.write(fd, ansicht):]
+
+
+def _ziel_pruefen(lstat_fn, name):
+    """Am Ziel darf nichts liegen oder nur eine normale Datei (kein Symlink,
+    keine Junction, kein Ordner). Nicht os.path.exists(): das folgt Verknüpfungen."""
+    try:
+        st = lstat_fn()
+    except FileNotFoundError:
+        return
+    if _art(st) != "datei":
+        raise ValueError(f"{name} ist keine normale Datei (z. B. eine Verknüpfung) - es wird nichts geschrieben.")
+
+
+def neu_anlegen(pfad, daten, modus=0o600):
+    """Neue Datei exklusiv anlegen (O_EXCL: scheitert, wenn dort schon etwas
+    liegt - auch eine Verknüpfung, der dann nicht gefolgt wird)."""
+    fd = os.open(pfad, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_BINAER | _O_CLOEXEC, modus)
+    try:
+        if os.name != "nt":
+            os.fchmod(fd, modus)
+        _alles_schreiben(fd, daten)
+        os.fsync(fd)
+    except BaseException:
+        os.close(fd)
+        try:
+            os.remove(pfad)
+        except OSError:
+            pass
+        raise
+    os.close(fd)
+
+
+def _tmp_name(name):
+    return f".{name}.{secrets.token_hex(8)}.tmp"   # nicht vorhersehbar
+
+
+def atomar_schreiben(ordner, name, daten, modus=0o644, pruefen=None):
+    """`daten` als ordner/name schreiben: erst vollständig in eine neue,
+    zufällig benannte Datei im selben Ordner (exklusiv, folgt keiner
+    Verknüpfung), gegenlesen und mit `pruefen(daten)` validieren, dann
+    atomar ersetzen. os.replace ersetzt nur den Verzeichniseintrag - nie das
+    Ziel einer Verknüpfung oder den Inhalt eines Hardlinks. Bei jedem Fehler
+    bleibt der alte Stand und keine Teildatei zurück."""
+    if not name or name in (".", "..") or "/" in name or "\\" in name:
+        raise ValueError("Ungültiger Dateiname.")
+    if pruefen:
+        pruefen(daten)
+    if os.name == "nt":
+        return _atomar_windows(ordner, name, daten, modus, pruefen)
+    return _atomar_posix(ordner, name, daten, modus, pruefen)
+
+
+def _atomar_posix(ordner, name, daten, modus, pruefen):
+    # Alle Schritte relativ zum geöffneten Ordner (dir_fd): ein Austausch des
+    # Ordnerpfads zwischendurch lenkt das Schreiben nicht um.
+    dfd = os.open(ordner, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _O_CLOEXEC)
+    tmp = None
+    try:
+        _ziel_pruefen(lambda: os.lstat(name, dir_fd=dfd), name)
+        tmp = _tmp_name(name)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _O_CLOEXEC, modus, dir_fd=dfd)
+        try:
+            os.fchmod(fd, modus)
+            _alles_schreiben(fd, daten)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        fd = os.open(tmp, os.O_RDONLY | os.O_NOFOLLOW | _O_CLOEXEC, dir_fd=dfd)
+        try:
+            gelesen = b"".join(iter(lambda: os.read(fd, MB), b""))
+        finally:
+            os.close(fd)
+        if gelesen != daten:
+            raise ValueError(f"{name} konnte nicht korrekt geschrieben werden.")
+        if pruefen:
+            pruefen(gelesen)
+        _ziel_pruefen(lambda: os.lstat(name, dir_fd=dfd), name)
+        os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        tmp = None
+        os.fsync(dfd)
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp, dir_fd=dfd)
+            except OSError:
+                pass
+        os.close(dfd)
+
+
+def _atomar_windows(ordner, name, daten, modus, pruefen):
+    # Windows: kein dir_fd. O_CREAT|O_EXCL entspricht CREATE_NEW (scheitert an
+    # allem Vorhandenen, folgt keiner Verknüpfung); MoveFileEx ersetzt nur den Eintrag.
+    ziel = os.path.join(ordner, name)
+    _ziel_pruefen(lambda: os.lstat(ziel), name)
+    tmp = os.path.join(ordner, _tmp_name(name))
+    try:
+        neu_anlegen(tmp, daten, modus)
+        if regulaer_lesen(tmp, len(daten) + 1) != daten:
+            raise ValueError(f"{name} konnte nicht korrekt geschrieben werden.")
+        _ziel_pruefen(lambda: os.lstat(ziel), name)
+        os.replace(tmp, ziel)
+        tmp = None
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Signierter Bestand: EINE Regel für Signieren und Prüfen
+# ---------------------------------------------------------------------------
+# - Regel "speedrace": nur die Einträge, die ein Update des Dashboards übernimmt
+#   (UPDATE_ALLOWED_FILES/UPDATE_ALLOWED_DIRS aus dessen app.py); in diesen Ordnern
+#   sind __pycache__/ und *.pyc ausgenommen (genau wie im Dashboard).
+# - Regel "alle": alle Dateien außer STANDARD_AUSSCHLUSS und den Ausnahmen des
+#   Profils. Ein ausgenommener Ordner (Muster wie ".git/*") wird nicht betreten.
+# - SIGNATUR.json gehört nie zum Bestand, muss aber eine normale Datei sein.
+# - Jeder Eintrag, der dabei gesehen wird, wird per lstat geprüft: Verknüpfungen
+#   (Symlinks, Junctions), FIFOs, Sockets und Geräte sind ein FEHLER - auch wenn
+#   sie unter eine Ausnahme fielen. Nichts wird stillschweigend übersprungen.
+# - Pfade: "/" als Trenner; "\" und Steuerzeichen sind verboten; zwei Pfade, die
+#   unter Windows dieselbe Datei wären (Groß-/Kleinschreibung, Unicode-Normalform),
+#   sind ein Fehler.
+# Prüfsumme (unverändert, kompatibel mit dem Dashboard): SHA-256, Textdateien
+# mit LF-Zeilenenden. Pruefmodul/signatur_pruefen.py setzt dieselbe Regel um
+# (Test tests/test_sicherheit.py vergleicht beide).
 def pruefsumme(pfad):
-    with open(pfad, "rb") as f:
-        daten = f.read()
+    daten = regulaer_lesen(pfad)
     if not pfad.lower().endswith(BINAER) and b"\0" not in daten:
         daten = daten.replace(b"\r\n", b"\n")
     return hashlib.sha256(daten).hexdigest()
@@ -76,44 +279,102 @@ def pruefsumme(pfad):
 def _speedrace_erlaubt(wurzel):
     """Erlaubte Update-Einträge aus der app.py des Ordners (Speedrace-Dashboard)."""
     try:
-        quelle = open(os.path.join(wurzel, "app.py"), encoding="utf-8").read()
+        quelle = regulaer_lesen(os.path.join(wurzel, "app.py"), 64 * MB).decode("utf-8")
         dateien = re.findall(r'"([^"]+)"', re.search(r"UPDATE_ALLOWED_FILES = \(([^)]*)\)", quelle).group(1))
         ordner = re.findall(r'"([^"]+)"', re.search(r"UPDATE_ALLOWED_DIRS = \(([^)]*)\)", quelle).group(1))
-    except (OSError, AttributeError):
+    except (OSError, AttributeError, UnicodeDecodeError):
         raise ValueError("Keine app.py des Speedrace-Dashboards in diesem Ordner gefunden.")
     return dateien, ordner
 
 
+def _pfad_schluessel(rel):
+    """Vergleichsform eines Pfads, wie Windows ihn sieht."""
+    return unicodedata.normalize("NFC", rel).casefold()
+
+
+def _eintrag_art(pfad, rel):
+    try:
+        art = _art(os.lstat(pfad))
+    except OSError as e:
+        raise ValueError(f"Nicht lesbar: {rel} ({e.__class__.__name__}).")
+    if art == "verknuepfung":
+        raise ValueError(f"Verknüpfung (Symlink/Junction) im Bestand: {rel} - nicht erlaubt.")
+    if art == "sonstiges":
+        raise ValueError(f"Kein normaler Dateityp (FIFO, Socket, Gerät): {rel} - nicht erlaubt.")
+    return art
+
+
+def _durchlaufen(wurzel, rel_basis, ausgenommen, out, tiefe=0):
+    if tiefe > _MAX_TIEFE:
+        raise ValueError(f"Ordner zu tief verschachtelt: {rel_basis}")
+    ordner = os.path.join(wurzel, *rel_basis.split("/")) if rel_basis else wurzel
+    try:
+        namen = sorted(os.listdir(ordner))
+    except OSError as e:
+        raise ValueError(f"Ordner nicht lesbar: {rel_basis or '.'} ({e.__class__.__name__}).")
+    for name in namen:
+        rel = f"{rel_basis}/{name}" if rel_basis else name
+        voll = os.path.join(ordner, name)
+        art = _eintrag_art(voll, rel)
+        if art == "ordner":
+            if not ausgenommen(rel, name, True):
+                _durchlaufen(wurzel, rel, ausgenommen, out, tiefe + 1)
+        elif not ausgenommen(rel, name, False):
+            out.append((rel, voll))
+
+
+def _eindeutig(eintraege):
+    """Doppelte bzw. unter Windows kollidierende Pfade -> ValueError."""
+    dateien, ordner = {}, set()
+    for rel, _ in eintraege:
+        if "\\" in rel or any(ord(c) < 32 or ord(c) == 127 for c in rel):
+            raise ValueError(f"Unzulässiger Dateiname im Bestand: {rel!r}")
+        k = _pfad_schluessel(rel)
+        if k in dateien:
+            raise ValueError(f"Pfade kollidieren (unter Windows gleich): {dateien[k]} und {rel}")
+        dateien[k] = rel
+        teile = k.split("/")
+        ordner.update("/".join(teile[:i]) for i in range(1, len(teile)))
+    for k in ordner & set(dateien):
+        raise ValueError(f"Datei und Ordner kollidieren (unter Windows gleich): {dateien[k]}")
+
+
 def dateiliste(wurzel, regel="alle", ausschluss=None):
-    """{relativer Pfad (mit /): Prüfsumme} der zu signierenden Dateien."""
-    out = {}
+    """{relativer Pfad (mit /): Prüfsumme} des signierten Bestands - die
+    zentrale Regel für Signieren und Prüfen (siehe oben). ValueError bei
+    Verknüpfungen, Sondertypen, Kollisionen."""
+    eintraege = []
+    sig = os.path.join(wurzel, SIGNATUR_DATEI)
+    if os.path.lexists(sig) and _eintrag_art(sig, SIGNATUR_DATEI) != "datei":
+        raise ValueError(f"{SIGNATUR_DATEI} ist keine normale Datei - abgelehnt.")
     if regel == "speedrace":
         dateien, ordner = _speedrace_erlaubt(wurzel)
+
+        def py_cache(rel, name, ist_ordner):
+            return name == "__pycache__" if ist_ordner else name.endswith(".pyc")
         for name in sorted(os.listdir(wurzel)):
-            pfad = os.path.join(wurzel, name)
-            if name == SIGNATUR_DATEI or os.path.islink(pfad):
+            if name == SIGNATUR_DATEI:
                 continue
-            if name in dateien and os.path.isfile(pfad):
-                out[name] = pruefsumme(pfad)
-            elif name in ordner and os.path.isdir(pfad):
-                for root, dirs, files in os.walk(pfad):
-                    dirs[:] = sorted(d for d in dirs if d != "__pycache__" and not os.path.islink(os.path.join(root, d)))
-                    for f in sorted(files):
-                        voll = os.path.join(root, f)
-                        if f.endswith(".pyc") or os.path.islink(voll):
-                            continue
-                        out[os.path.relpath(voll, wurzel).replace(os.sep, "/")] = pruefsumme(voll)
-        return out
-    muster = STANDARD_AUSSCHLUSS + [m.strip() for m in (ausschluss or []) if m.strip()]
-    for root, dirs, files in os.walk(wurzel):
-        dirs[:] = sorted(d for d in dirs if not os.path.islink(os.path.join(root, d)))
-        for f in sorted(files):
-            voll = os.path.join(root, f)
-            rel = os.path.relpath(voll, wurzel).replace(os.sep, "/")
-            if os.path.islink(voll) or any(fnmatch.fnmatch(rel, m) or fnmatch.fnmatch(f, m) for m in muster):
-                continue
-            out[rel] = pruefsumme(voll)
-    return out
+            voll = os.path.join(wurzel, name)
+            art = _eintrag_art(voll, name)
+            if name in dateien:
+                if art != "datei":
+                    raise ValueError(f"{name} ist keine normale Datei - nicht erlaubt.")
+                eintraege.append((name, voll))
+            elif name in ordner:
+                if art != "ordner":
+                    raise ValueError(f"{name} ist kein Ordner - nicht erlaubt.")
+                _durchlaufen(wurzel, name, py_cache, eintraege, 1)
+    else:
+        muster = STANDARD_AUSSCHLUSS + [m.strip() for m in (ausschluss or []) if m.strip()]
+
+        def ausgenommen(rel, name, ist_ordner):
+            if ist_ordner:   # nur Muster, die alles darunter treffen ("…/*")
+                return any(m.endswith("*") and fnmatch.fnmatch(rel + "/", m) for m in muster)
+            return any(fnmatch.fnmatch(rel, m) or fnmatch.fnmatch(name, m) for m in muster)
+        _durchlaufen(wurzel, "", ausgenommen, eintraege)
+    _eindeutig(eintraege)
+    return {rel: pruefsumme(voll) for rel, voll in eintraege}
 
 
 def nachricht(version, dateien):
@@ -123,24 +384,42 @@ def nachricht(version, dateien):
 
 def ordner_version(wurzel):
     try:
-        return open(os.path.join(wurzel, "VERSION"), encoding="utf-8").read().strip()[:40]
-    except OSError:
+        return regulaer_lesen(os.path.join(wurzel, "VERSION"), 4096).decode("utf-8").strip()[:40]
+    except (OSError, ValueError, UnicodeDecodeError):
         return ""
 
 
-def privat_laden(pfad, kennwort):
+def _privat_aus_pem(pem, kennwort):
     from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     try:
-        with open(pfad, "rb") as f:
-            return serialization.load_pem_private_key(f.read(), kennwort.encode("utf-8"))
+        privat = serialization.load_pem_private_key(pem, kennwort.encode("utf-8"))
     except (ValueError, TypeError):
         raise ValueError("Kennwort falsch oder Schlüsseldatei beschädigt.")
+    if not isinstance(privat, Ed25519PrivateKey):
+        raise ValueError("Das ist kein Ed25519-Schlüssel.")
+    return privat
+
+
+def privat_laden(pfad, kennwort):
+    try:
+        pem = regulaer_lesen(pfad, 64 * 1024)
+    except OSError:
+        raise ValueError("Schlüsseldatei nicht gefunden.")
+    return _privat_aus_pem(pem, kennwort)
 
 
 def oeffentlich_text(privat):
     from cryptography.hazmat.primitives import serialization
     return base64.b64encode(privat.public_key().public_bytes(serialization.Encoding.Raw,
                                                              serialization.PublicFormat.Raw)).decode("ascii")
+
+
+def _signatur_json_pruefen(daten):
+    sig = json.loads(daten.decode("utf-8"))
+    if not isinstance(sig, dict) or sig.get("format") != FORMAT or not isinstance(sig.get("dateien"), dict):
+        raise ValueError("SIGNATUR.json hat ein ungültiges Format.")
+    return sig
 
 
 def signieren(wurzel, profil, kennwort, version=None):
@@ -154,21 +433,23 @@ def signieren(wurzel, profil, kennwort, version=None):
     signatur = privat.sign(nachricht(version, dateien))
     inhalt = json.dumps({"format": FORMAT, "version": version, "dateien": dateien,
                          "signatur": base64.b64encode(signatur).decode("ascii")}, indent=1, sort_keys=True) + "\n"
-    with open(os.path.join(wurzel, SIGNATUR_DATEI), "w", encoding="utf-8", newline="\n") as f:
-        f.write(inhalt)
+    atomar_schreiben(wurzel, SIGNATUR_DATEI, inhalt.encode("utf-8"), 0o644, _signatur_json_pruefen)
     return version, len(dateien), inhalt
 
 
 def pruefen(wurzel, oeffentlich, regel="alle", ausschluss=None):
-    """-> {"ok", "version", "anzahl", "abweichend", "fehler"}"""
+    """-> {"ok", "version", "anzahl", "abweichend", "arten", "fehler"}"""
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     try:
-        sig = json.load(open(os.path.join(wurzel, SIGNATUR_DATEI), encoding="utf-8"))
-        if sig.get("format") != FORMAT or not isinstance(sig.get("dateien"), dict):
+        sig = _signatur_json_pruefen(regulaer_lesen(os.path.join(wurzel, SIGNATUR_DATEI), MAX_SIGNATUR_BYTES))
+        if not all(isinstance(k, str) and isinstance(v, str) for k, v in sig["dateien"].items()):
             raise ValueError
-    except (OSError, ValueError):
-        return {"ok": False, "fehler": "Keine gültige SIGNATUR.json in diesem Ordner."}
+    except FileNotFoundError:
+        return {"ok": False, "fehler": "Keine SIGNATUR.json in diesem Ordner."}
+    except (OSError, ValueError, UnicodeDecodeError) as e:
+        text = str(e) if "keine normale Datei" in str(e) else "Keine gültige SIGNATUR.json in diesem Ordner."
+        return {"ok": False, "fehler": text}
     try:
         Ed25519PublicKey.from_public_bytes(base64.b64decode(oeffentlich, validate=True)).verify(
             base64.b64decode(sig.get("signatur") or "", validate=True), nachricht(str(sig.get("version") or ""), sig["dateien"]))
@@ -177,9 +458,13 @@ def pruefen(wurzel, oeffentlich, regel="alle", ausschluss=None):
     try:
         ist = dateiliste(wurzel, regel, ausschluss)
     except ValueError as e:
-        return {"ok": False, "fehler": str(e)}
-    abweichend = sorted(n for n in set(ist) | set(sig["dateien"]) if ist.get(n) != sig["dateien"].get(n))
+        return {"ok": False, "version": sig.get("version"), "fehler": str(e)}
+    soll = sig["dateien"]
+    arten = {n: ("fehlt" if n not in ist else "zusätzlich" if n not in soll else "verändert")
+             for n in set(ist) | set(soll) if ist.get(n) != soll.get(n)}
+    abweichend = sorted(arten)
     return {"ok": not abweichend, "version": sig.get("version"), "anzahl": len(ist), "abweichend": abweichend[:50],
+            "arten": {n: arten[n] for n in abweichend[:50]},
             "fehler": "Diese Dateien passen nicht zur Signatur." if abweichend else ""}
 
 
@@ -195,17 +480,19 @@ def _profile_datei():
 
 def profile_laden():
     try:
-        d = json.load(open(_profile_datei(), encoding="utf-8"))
+        daten = regulaer_lesen(_profile_datei(), 16 * MB)
+    except FileNotFoundError:
+        return {}
+    try:
+        d = json.loads(daten.decode("utf-8"))
         return d if isinstance(d, dict) else {}
-    except (OSError, ValueError):
+    except (ValueError, UnicodeDecodeError):
         return {}
 
 
 def profile_speichern(d):
-    tmp = _profile_datei() + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(d, f, indent=1, ensure_ascii=False)
-    os.replace(tmp, _profile_datei())
+    daten = json.dumps(d, indent=1, ensure_ascii=False).encode("utf-8")
+    atomar_schreiben(daten_ordner(), "profile.json", daten, 0o600, lambda b: json.loads(b.decode("utf-8")))
 
 
 def schluessel_pfad(profil):
@@ -232,43 +519,209 @@ def _dpapi(daten, schuetzen):
         ctypes.windll.kernel32.LocalFree(aus.pbData)
 
 
+# GitHub-Token - wo es liegt:
+#   Windows:          "dpapi:…" in profile.json, mit DPAPI verschlüsselt (dauerhaft)
+#   macOS/Linux:      im Schlüsselbund des Betriebssystems über das Paket "keyring",
+#                     in profile.json nur der Vermerk "keyring:" (dauerhaft)
+#   ohne beides:      nur im Arbeitsspeicher dieser Sitzung (nicht dauerhaft)
+#   Altbestand "klar:…" (Base64, also KLARTEXT) wird erkannt, nie mehr geschrieben
+#   und auf Wunsch in einen der sicheren Speicher übernommen (Aktion token_migrieren).
+_KEYRING_DIENST, _KEYRING_NAME = PROGRAMM, "github_token"
+_sitzung = {"token": ""}
+_geheim_bekannt = set()     # zum Schwärzen in Fehlermeldungen
+
+
+def _merken(t):
+    if t and len(t) >= 8:
+        _geheim_bekannt.add(t)
+    return t
+
+
+def _keyring():
+    """Sicherer Schlüsselbund des Betriebssystems oder None (kein Klartext-Backend)."""
+    if os.name == "nt":
+        return None
+    try:
+        import keyring
+        kr = keyring.get_keyring()
+    except Exception:
+        return None
+    art = f"{type(kr).__module__}.{type(kr).__name__}".lower()
+    if getattr(kr, "priority", 0) <= 0 or any(w in art for w in ("fail", "null", "plaintext", "keyrings.alt")):
+        return None
+    return kr
+
+
+def token_speicher_art():
+    return "dpapi" if os.name == "nt" else ("schluesselbund" if _keyring() else "sitzung")
+
+
 def geheim_speichern(text):
+    """-> Wert für profile.json (bei "sitzung": "", das Token bleibt nur im Speicher)."""
+    _merken(text)
     if os.name == "nt":
         return "dpapi:" + base64.b64encode(_dpapi(text.encode("utf-8"), True)).decode("ascii")
-    return "klar:" + base64.b64encode(text.encode("utf-8")).decode("ascii")   # nur zum Testen außerhalb von Windows
+    kr = _keyring()
+    if kr:
+        kr.set_password(_KEYRING_DIENST, _KEYRING_NAME, text)
+        return "keyring:"
+    _sitzung["token"] = text
+    return ""
+
+
+def geheim_entfernen():
+    _sitzung["token"] = ""
+    kr = _keyring()
+    if kr:
+        try:
+            kr.delete_password(_KEYRING_DIENST, _KEYRING_NAME)
+        except Exception:
+            pass
 
 
 def geheim_lesen(wert):
     wert = str(wert or "")
     if wert.startswith("dpapi:") and os.name == "nt":
-        return _dpapi(base64.b64decode(wert[6:]), False).decode("utf-8")
-    if wert.startswith("klar:"):
-        return base64.b64decode(wert[5:]).decode("utf-8")
-    return ""
+        return _merken(_dpapi(base64.b64decode(wert[6:]), False).decode("utf-8"))
+    if wert == "keyring:":
+        kr = _keyring()
+        try:
+            return _merken((kr.get_password(_KEYRING_DIENST, _KEYRING_NAME) or "") if kr else "")
+        except Exception:
+            return ""
+    if wert.startswith("klar:"):   # Altbestand (unsicher) - bis zur Übernahme weiter nutzbar
+        try:
+            return _merken(base64.b64decode(wert[5:]).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return ""
+    return _sitzung["token"]
+
+
+_TOKEN_MUSTER = re.compile(r"(github_pat_[A-Za-z0-9_]{10,}|gh[pousr]_[A-Za-z0-9]{10,}|Bearer\s+\S+)")
+
+
+def schwaerzen(text):
+    """Tokens aus Texten entfernen, bevor sie angezeigt werden."""
+    text = _TOKEN_MUSTER.sub("***", str(text))
+    for t in list(_geheim_bekannt):
+        text = text.replace(t, "***")
+    return text
 
 
 # ---------------------------------------------------------------------------
 # GitHub
 # ---------------------------------------------------------------------------
-def _gh(pfad, token, methode="GET", daten=None, roh=False, timeout=60):
-    req = urllib.request.Request(GITHUB_API + pfad, method=methode,
-                                 data=json.dumps(daten).encode("utf-8") if daten is not None else None,
-                                 headers={"Accept": "application/vnd.github+json", "User-Agent": PROGRAMM,
-                                          "X-GitHub-Api-Version": "2022-11-28",
-                                          **({"Authorization": f"Bearer {token}"} if token else {}),
-                                          **({"Content-Type": "application/json"} if daten is not None else {})})
+# Das Token geht NUR an die API-Hosts. Weiterleitungen werden nicht automatisch
+# verfolgt, sondern einzeln geprüft: nur https, nur bekannte GitHub-Hosts, höchstens
+# fünf, keine Schleifen; bei jedem Wechsel des Hosts fällt das Token weg (auch für
+# alle weiteren Sprünge). Downloads laufen so ohne Token weiter.
+_API_HOSTS = frozenset({"api.github.com", "uploads.github.com"})
+_DOWNLOAD_HOSTS = frozenset({"github.com", "codeload.github.com", "objects.githubusercontent.com",
+                             "github-releases.githubusercontent.com", "release-assets.githubusercontent.com"})
+_SCHEMATA = ("https",)
+_MAX_WEITERLEITUNGEN = 5
+_JSON_MAX = 64 * MB
+
+
+class HttpFehler(ValueError):
+    def __init__(self, code):
+        super().__init__(f"GitHub-Fehler {code}.")
+        self.code = code
+
+
+class _KeineAutoWeiterleitung(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None   # 3xx kommt als HTTPError zurück und wird in _anfrage geprüft
+
+
+def _oeffner():
+    return urllib.request.build_opener(_KeineAutoWeiterleitung)
+
+
+def _adresse_pruefen(url, vorher=None):
+    """-> (Host, Port) einer erlaubten Adresse, sonst ValueError."""
+    t = urllib.parse.urlsplit(url)
+    host = (t.hostname or "").lower()
+    if t.scheme not in _SCHEMATA or not host or t.username or t.password:
+        raise ValueError("Unzulässige Adresse (nur https zu GitHub).")
+    if vorher and urllib.parse.urlsplit(vorher).scheme == "https" and t.scheme != "https":
+        raise ValueError("Weiterleitung von https auf http abgelehnt.")
+    if host not in _API_HOSTS | _DOWNLOAD_HOSTS:
+        raise ValueError(f"Verbindung zu einem nicht vorgesehenen Server ({host}) abgelehnt.")
+    return host, t.port
+
+
+def _lesen(r, limit, ziel):
+    laenge = r.headers.get("Content-Length")
+    if laenge and laenge.isdigit() and int(laenge) > limit:
+        raise ValueError("Antwort von GitHub zu groß - abgebrochen.")
+    teile, n = [], 0
+    while True:
+        b = r.read(MB)
+        if not b:
+            break
+        n += len(b)
+        if n > limit:
+            raise ValueError("Antwort von GitHub zu groß - abgebrochen.")
+        if ziel is not None:
+            ziel.write(b)
+        else:
+            teile.append(b)
+    return n if ziel is not None else b"".join(teile)
+
+
+def _anfrage(url, token=None, methode="GET", daten=None, kopf=None, timeout=60, limit=_JSON_MAX, ziel=None):
+    """HTTP-Anfrage mit geprüften Weiterleitungen -> Bytes (bzw. Anzahl, wenn
+    `ziel` ein Dateiobjekt ist). Fehler: HttpFehler(code) bzw. ValueError,
+    beide ohne Header oder Token."""
+    host, port = _adresse_pruefen(url)
+    token_ziel = (host, port) if token and host in _API_HOSTS else None
+    besucht, vorher = set(), None
+    for _ in range(_MAX_WEITERLEITUNGEN + 1):
+        host, port = _adresse_pruefen(url, vorher)
+        if url in besucht:
+            raise ValueError("Weiterleitungsschleife - abgebrochen.")
+        besucht.add(url)
+        h = {"User-Agent": PROGRAMM, **(kopf or {})}
+        if token_ziel and (host, port) == token_ziel:
+            h["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(url, data=daten, method=methode, headers=h)
+        try:
+            with _oeffner().open(req, timeout=timeout) as r:
+                return _lesen(r, limit, ziel)
+        except urllib.error.HTTPError as e:
+            ort = e.headers.get("Location") if e.headers else None
+            code = e.code
+            e.close()
+            if code not in (301, 302, 303, 307, 308) or not ort:
+                raise HttpFehler(code) from None
+            if methode not in ("GET", "HEAD"):
+                raise ValueError("Unerwartete Weiterleitung bei einer schreibenden GitHub-Anfrage - abgebrochen.") from None
+            vorher, url = url, urllib.parse.urljoin(url, ort)
+            if token_ziel and _adresse_pruefen(url, vorher) != token_ziel:
+                token_ziel = None   # anderer Host: das Token ist für diese Kette erledigt
+        except (urllib.error.URLError, OSError) as e:
+            raise ValueError(f"GitHub nicht erreichbar ({e.__class__.__name__}).") from None
+    raise ValueError("Zu viele Weiterleitungen - abgebrochen.")
+
+
+_API_FEHLER = {401: "GitHub-Token ungültig oder abgelaufen.", 403: "Keine Berechtigung (Token braucht „Contents: Read and write“).",
+               404: "Repository oder Zweig nicht gefunden (bei privatem Repository: Token nötig).",
+               409: "GitHub meldet einen Konflikt - bitte erneut versuchen.",
+               422: "GitHub hat die Anfrage abgelehnt."}
+
+
+def _gh(pfad, token, methode="GET", daten=None, roh=False, timeout=60, limit=_JSON_MAX, ziel=None):
+    kopf = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
+            **({"Content-Type": "application/json"} if daten is not None else {})}
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            inhalt = r.read(300 * 1024 * 1024)
-    except urllib.error.HTTPError as e:
-        meldung = {401: "GitHub-Token ungültig oder abgelaufen.", 403: "Keine Berechtigung (Token braucht „Contents: Read and write“).",
-                   404: "Repository oder Zweig nicht gefunden (bei privatem Repository: Token nötig).",
-                   409: "GitHub meldet einen Konflikt - bitte erneut versuchen.",
-                   422: "GitHub hat die Anfrage abgelehnt."}.get(e.code, f"GitHub-Fehler {e.code}.")
-        raise ValueError(meldung)
-    except OSError as e:
-        raise ValueError(f"GitHub nicht erreichbar ({e.__class__.__name__}).")
-    return inhalt if roh else json.loads(inhalt.decode("utf-8") or "{}")
+        inhalt = _anfrage(GITHUB_API + pfad, token, methode, json.dumps(daten).encode("utf-8") if daten is not None else None,
+                          kopf, timeout, limit, ziel)
+    except HttpFehler as e:
+        raise ValueError(_API_FEHLER.get(e.code, f"GitHub-Fehler {e.code}.")) from None
+    if roh or ziel is not None:
+        return inhalt
+    return json.loads(inhalt.decode("utf-8") or "{}")
 
 
 def _zweig_stand(repo, zweig, token):
@@ -276,25 +729,186 @@ def _zweig_stand(repo, zweig, token):
     return d["commit"]["sha"]
 
 
-def github_laden(repo, zweig, token, ziel):
-    """Stand des Zweigs als Ordner -> (Ordner, Commit)."""
+# Grenzen für den Import eines GitHub-Archivs (zipball). Großzügig für ein
+# normales Repository (Speedrace-Dashboard: rund 160 Dateien, 50 MB, größte
+# Datei 20 MB), aber ZIP-Bomben und unangemessen große Archive werden schon vor
+# dem Entpacken (laut Verzeichnis) und währenddessen (gezählte Bytes) abgelehnt.
+# Anpassbar hier oder je Aufruf über den Parameter `grenzen`.
+ZIP_GRENZEN = {
+    "archiv_bytes": 300 * MB,     # komprimiertes Archiv (Download)
+    "eintraege": 20000,           # Einträge im Archiv
+    "datei_bytes": 200 * MB,      # eine entpackte Datei
+    "gesamt_bytes": 1024 * MB,    # alle entpackten Dateien zusammen
+    "verhaeltnis": 200,           # entpackt : komprimiert je Eintrag (ab 1 MB entpackt)
+    "pfad_zeichen": 240,          # Länge des relativen Pfads
+    "tiefe": 32,                  # Ordnerebenen
+    "je_ordner": 5000,            # Einträge in einem Ordner
+}
+_WIN_RESERVIERT = re.compile(r"^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[0-9¹²³]|LPT[0-9¹²³])(\.[^.]*)?$", re.I)
+_WIN_VERBOTEN = frozenset('<>:"|?*\\')
+
+
+def zip_pfad_teile(rel, grenzen=None):
+    """Bestandteile eines relativen ZIP-Pfads; ValueError, wenn er unter POSIX
+    ODER Windows absolut, laufwerksbezogen (C:, C:..), UNC (\\\\server),
+    mit Backslash, ".."/"." oder sonst für Windows unzulässig wäre."""
+    g = {**ZIP_GRENZEN, **(grenzen or {})}
+    fehler = ValueError(f"Unzulässiger Pfad im Archiv: {rel[:80]!r} - nichts wird übernommen.")
+    if not rel or "\x00" in rel or "\\" in rel:
+        raise fehler
+    w = PureWindowsPath(rel)
+    if PurePosixPath(rel).is_absolute() or w.drive or w.root or w.anchor:
+        raise fehler
+    teile = rel.split("/")
+    for t in teile:
+        if t in ("", ".", "..") or t[-1] in " ." or _WIN_RESERVIERT.match(t) \
+                or any(ord(c) < 32 or ord(c) == 127 or c in _WIN_VERBOTEN for c in t):
+            raise fehler
+    if len(rel) > g["pfad_zeichen"] or len(teile) > g["tiefe"]:
+        raise ValueError(f"Pfad im Archiv zu lang oder zu tief: {rel[:80]!r} - nichts wird übernommen.")
+    return teile
+
+
+def _enthalten(basis, pfad):
+    """Endgültiger Schreibpfad (aufgelöst) muss unterhalb von basis liegen."""
+    r = Path(pfad).resolve()
+    if r == basis or not r.is_relative_to(basis):
+        raise ValueError("Pfad im Archiv führt aus dem Zielordner heraus - nichts wird übernommen.")
+    return r
+
+
+def _ordner_anlegen(basis, teile):
+    akt = str(basis)
+    for t in teile:
+        akt = os.path.join(akt, t)
+        try:
+            os.mkdir(akt, 0o700)
+        except FileExistsError:
+            pass
+        if _art(os.lstat(akt)) != "ordner":
+            raise ValueError("Unerwarteter Eintrag beim Entpacken - nichts wird übernommen.")
+        _enthalten(basis, akt)
+    return akt
+
+
+def _zip_plan(z, g):
+    """Alle Einträge VOR dem Entpacken prüfen -> (Ordner, [(info, teile)])."""
+    infos = z.infolist()
+    if len(infos) > g["eintraege"]:
+        raise ValueError("Das Archiv hat zu viele Einträge - abgelehnt.")
+    praefix, arten, eltern, je_ordner, gesamt = None, {}, set(), {}, 0
+    ordner, dateien = [], []
+    for info in infos:
+        name = info.filename
+        if "\\" in info.orig_filename:
+            raise ValueError("Backslash in einem Pfad des Archivs - abgelehnt.")
+        if info.flag_bits & 0x1:
+            raise ValueError("Verschlüsselte Einträge im Archiv - abgelehnt.")
+        if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+            raise ValueError("Unzulässige Kompression im Archiv - abgelehnt.")
+        ist_ordner = name.endswith("/")
+        typ = stat.S_IFMT(info.external_attr >> 16)
+        if typ not in (0, stat.S_IFREG, stat.S_IFDIR) or (typ and (typ == stat.S_IFDIR) != ist_ordner):
+            raise ValueError(f"Verknüpfung oder Sondertyp im Archiv: {name[:80]!r} - abgelehnt.")
+        if (info.external_attr & 0x10) and not ist_ordner:
+            raise ValueError(f"Widersprüchlicher Eintrag im Archiv: {name[:80]!r} - abgelehnt.")
+        kopf, trenner, rest = name.partition("/")
+        if praefix is None:
+            zip_pfad_teile(kopf, g)
+            praefix = kopf
+        if kopf != praefix or not trenner:
+            raise ValueError("Unerwarteter Aufbau des Archivs (ein gemeinsamer Hauptordner fehlt) - abgelehnt.")
+        rel = rest[:-1] if ist_ordner else rest
+        if not rel:
+            if ist_ordner:
+                continue
+            raise ValueError("Unerwarteter Aufbau des Archivs - abgelehnt.")
+        teile = zip_pfad_teile(rel, g)
+        k = _pfad_schluessel(rel)
+        if k in arten:
+            raise ValueError(f"Doppelter bzw. unter Windows gleicher Pfad im Archiv: {rel[:80]!r} - abgelehnt.")
+        for i in range(1, len(teile)):
+            pk = _pfad_schluessel("/".join(teile[:i]))
+            if arten.get(pk) == "datei":
+                raise ValueError(f"Datei und Ordner kollidieren im Archiv: {rel[:80]!r} - abgelehnt.")
+            eltern.add(pk)
+        if not ist_ordner and k in eltern:
+            raise ValueError(f"Datei und Ordner kollidieren im Archiv: {rel[:80]!r} - abgelehnt.")
+        arten[k] = "ordner" if ist_ordner else "datei"
+        ek = _pfad_schluessel("/".join(teile[:-1]))
+        je_ordner[ek] = je_ordner.get(ek, 0) + 1
+        if je_ordner[ek] > g["je_ordner"]:
+            raise ValueError("Zu viele Einträge in einem Ordner des Archivs - abgelehnt.")
+        if ist_ordner:
+            ordner.append(teile)
+            continue
+        if info.file_size > g["datei_bytes"]:
+            raise ValueError(f"Datei im Archiv zu groß: {rel[:80]!r} - abgelehnt.")
+        gesamt += info.file_size
+        if gesamt > g["gesamt_bytes"]:
+            raise ValueError("Das Archiv ist entpackt zu groß - abgelehnt.")
+        if info.file_size > MB and info.file_size > g["verhaeltnis"] * max(info.compress_size, 1):
+            raise ValueError(f"Verdächtig hohe Kompression (ZIP-Bombe?): {rel[:80]!r} - abgelehnt.")
+        dateien.append((info, teile))
+    return ordner, dateien
+
+
+def zip_entpacken(quelle, ziel, grenzen=None):
+    """GitHub-Archiv (Dateiobjekt) in den leeren Ordner `ziel` entpacken.
+    Erst wird das ganze Verzeichnis geprüft, dann entpackt; jede Abweichung
+    bricht vollständig ab (ValueError) - der Aufrufer verwirft `ziel` dann."""
+    g = {**ZIP_GRENZEN, **(grenzen or {})}
+    basis = Path(ziel).resolve()
+    if os.listdir(basis):
+        raise ValueError("Zielordner zum Entpacken ist nicht leer.")
+    try:
+        with zipfile.ZipFile(quelle) as z:
+            ordner, dateien = _zip_plan(z, g)
+            for teile in ordner:
+                _ordner_anlegen(basis, teile)
+            geschrieben = 0
+            for info, teile in dateien:
+                pfad = os.path.join(_ordner_anlegen(basis, teile[:-1]), teile[-1])
+                _enthalten(basis, pfad)
+                fd = os.open(pfad, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_BINAER | _O_CLOEXEC, 0o600)
+                with os.fdopen(fd, "wb") as dst, z.open(info) as src:
+                    n = 0
+                    while True:
+                        b = src.read(MB)
+                        if not b:
+                            break
+                        n += len(b)
+                        geschrieben += len(b)
+                        if n > info.file_size or n > g["datei_bytes"] or geschrieben > g["gesamt_bytes"]:
+                            raise ValueError("Das Archiv enthält mehr Daten als angegeben - abgelehnt.")
+                        dst.write(b)
+                if n != info.file_size:
+                    raise ValueError("Das Archiv ist unvollständig - abgelehnt.")
+    except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError, OSError) as e:
+        raise ValueError(f"Das Archiv von GitHub ist beschädigt oder unzulässig ({e.__class__.__name__}) - "
+                         "nichts wird übernommen.") from None
+    return len(dateien)
+
+
+def github_laden(repo, zweig, token, ziel, grenzen=None):
+    """Stand des Zweigs als Ordner -> (Ordner, Commit). Der Ordner wird neu in
+    `ziel` angelegt; bei jedem Fehler wird er vollständig entfernt."""
     if not _REPO_RE.match(repo or "") or not _ZWEIG_RE.match(zweig or ""):
         raise ValueError("Repository bitte als „Besitzer/Name“ angeben, Zweig z. B. „main“.")
+    g = {**ZIP_GRENZEN, **(grenzen or {})}
     stand = _zweig_stand(repo, zweig, token)
-    daten = _gh(f"/repos/{repo}/zipball/{stand}", token, roh=True, timeout=300)
-    with zipfile.ZipFile(io.BytesIO(daten)) as z:
-        for info in z.infolist():
-            teile = info.filename.split("/", 1)
-            if len(teile) < 2 or not teile[1] or info.is_dir():
-                continue
-            rel = os.path.normpath(teile[1])
-            if rel.startswith("..") or os.path.isabs(rel) or (info.external_attr >> 16) & 0o170000 == 0o120000:
-                continue   # kein Ausbruch aus dem Ordner, keine Verknüpfungen
-            pfad = os.path.join(ziel, rel)
-            os.makedirs(os.path.dirname(pfad), exist_ok=True)
-            with z.open(info) as src, open(pfad, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-    return ziel, stand
+    if not re.fullmatch(r"[0-9a-f]{40}", stand or ""):
+        raise ValueError("Unerwartete Antwort von GitHub (Commit).")
+    ordner = tempfile.mkdtemp(prefix="stand-", dir=ziel)
+    try:
+        with tempfile.TemporaryFile() as archiv:   # ohne Namen im Dateisystem
+            _gh(f"/repos/{repo}/zipball/{stand}", token, timeout=300, limit=g["archiv_bytes"], ziel=archiv)
+            archiv.seek(0)
+            zip_entpacken(archiv, ordner, g)
+    except BaseException:
+        shutil.rmtree(ordner, ignore_errors=True)
+        raise
+    return ordner, stand
 
 
 def github_hochladen(repo, zweig, token, inhalt, version, stand):
@@ -322,24 +936,45 @@ def github_hochladen(repo, zweig, token, inhalt, version, stand):
     return (d.get("commit") or {}).get("sha", "")
 
 
+def _tag_commit(repo, token, name):
+    """Commit, auf den der Tag zeigt (auch bei annotierten Tags), oder None."""
+    try:
+        ref = _gh(f"/repos/{repo}/git/ref/tags/{urllib.parse.quote(name, safe='')}", token)
+    except ValueError:
+        return None
+    obj = (ref or {}).get("object") or {} if isinstance(ref, dict) else {}
+    for _ in range(5):
+        if obj.get("type") != "tag":
+            return obj.get("sha")
+        obj = (_gh(f"/repos/{repo}/git/tags/{obj.get('sha')}", token) or {}).get("object") or {}
+    return None
+
+
+def github_tag_frei(repo, token, version, stand):
+    """Vor dem Hochladen: ein vorhandener Tag v<Version> darf nur schon genau
+    auf diesen Stand zeigen - veröffentlichte Versionen werden nie verschoben."""
+    if not _TAG_VERSION_RE.match(version or ""):
+        return
+    vorhanden = _tag_commit(repo, token, f"v{version}")
+    if vorhanden and vorhanden != stand:
+        raise ValueError(f"Den Tag v{version} gibt es schon (auf {vorhanden[:7]}). Eine veröffentlichte Version wird "
+                         "nicht verändert - bitte VERSION erhöhen und neu signieren.")
+
+
 def github_tag_setzen(repo, token, version, commit):
-    """Tag v<Version> auf den signierten Stand setzen (bzw. dorthin
-    verschieben) -> Tag-Name oder "". Programme, die Versionen über Tags
-    finden (z. B. das Update aus GitHub im Speedrace Dashboard), laden so den
-    Stand mit der passenden SIGNATUR.json."""
+    """Tag v<Version> auf den signierten Stand setzen -> Tag-Name oder "".
+    Programme, die Versionen über Tags finden (z. B. das Update aus GitHub im
+    Speedrace Dashboard), laden so den Stand mit der passenden SIGNATUR.json.
+    Ein vorhandener Tag auf einem anderen Stand wird NICHT verschoben."""
     if not _TAG_VERSION_RE.match(version or "") or not re.match(r"^[0-9a-f]{40}$", commit or ""):
         return ""
     name = f"v{version}"
-    ref = f"/repos/{repo}/git/refs/tags/{urllib.parse.quote(name, safe='')}"
-    try:
-        vorhanden = _gh(f"/repos/{repo}/git/ref/tags/{urllib.parse.quote(name, safe='')}", token)
-    except ValueError:
-        vorhanden = None
-    if isinstance(vorhanden, dict) and (vorhanden.get("object") or {}).get("sha"):
-        if vorhanden["object"]["sha"] != commit:
-            _gh(ref, token, "PATCH", {"sha": commit, "force": True})
-    else:
-        _gh(f"/repos/{repo}/git/refs", token, "POST", {"ref": f"refs/tags/{name}", "sha": commit})
+    vorhanden = _tag_commit(repo, token, name)
+    if vorhanden == commit:
+        return name
+    if vorhanden:
+        raise ValueError(f"Tag {name} zeigt schon auf einen anderen Stand ({vorhanden[:7]}) und wird nicht verschoben.")
+    _gh(f"/repos/{repo}/git/refs", token, "POST", {"ref": f"refs/tags/{name}", "sha": commit})
     return name
 
 
@@ -351,30 +986,13 @@ def _version_tupel(v):
     return tuple(int(x) for x in m.groups()) if m else None
 
 
-class _OhneAuthWeiter(urllib.request.HTTPRedirectHandler):
-    """Weiterleitung zum Download-Server von GitHub ohne das Token."""
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        neu = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if neu is not None and urllib.parse.urlsplit(newurl).hostname != urllib.parse.urlsplit(req.full_url).hostname:
-            neu.remove_header("Authorization")
-        return neu
-
-
 def _herunterladen(url, token=None, limit=_EXE_MAX, accept="application/octet-stream"):
-    if not url.startswith("https://"):
-        raise ValueError("Ungültige Download-Adresse.")
-    req = urllib.request.Request(url, headers={"Accept": accept, "User-Agent": PROGRAMM,
-                                               **({"Authorization": f"Bearer {token}"} if token else {})})
+    """Download über _anfrage: das Token geht nur an die GitHub-API, nie an
+    den Download-Server, auf den GitHub weiterleitet."""
     try:
-        with urllib.request.build_opener(_OhneAuthWeiter).open(req, timeout=300) as r:
-            daten = r.read(limit + 1)
-    except urllib.error.HTTPError as e:
-        raise ValueError(f"Download fehlgeschlagen (GitHub-Fehler {e.code}).")
-    except OSError as e:
-        raise ValueError(f"GitHub nicht erreichbar ({e.__class__.__name__}).")
-    if len(daten) > limit:
-        raise ValueError("Download zu groß.")
-    return daten
+        return _anfrage(url, token, kopf={"Accept": accept}, timeout=300, limit=limit)
+    except HttpFehler as e:
+        raise ValueError(f"Download fehlgeschlagen (GitHub-Fehler {e.code}).") from None
 
 
 def _exe_plausibel(daten):
@@ -395,8 +1013,9 @@ def werkzeug_signatur_pruefen(sig_daten, exe, version, oeffentlich=None):
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     try:
         sig = json.loads(sig_daten.decode("utf-8"))
-        assert isinstance(sig, dict) and sig.get("format") == FORMAT
-    except (ValueError, UnicodeDecodeError, AssertionError):
+        if not isinstance(sig, dict) or sig.get("format") != FORMAT:
+            raise ValueError
+    except (ValueError, UnicodeDecodeError):
         raise ValueError("SIGNATUR.json des Updates ist ungültig.")
     dateien = {EXE_NAME: hashlib.sha256(exe).hexdigest()}
     if sig.get("version") != version or sig.get("dateien") != dateien:
@@ -435,11 +1054,7 @@ def werkzeug_bau_starten(token):
     if not _version_tupel(version):
         raise ValueError("In signier_werkzeug.py auf main steht keine gültige VERSION.")
     name = f"v{version}"
-    try:
-        vorhanden = _gh(f"/repos/{WERKZEUG_REPO}/git/ref/tags/{name}", token)
-    except ValueError:
-        vorhanden = None
-    if isinstance(vorhanden, dict) and vorhanden.get("object"):
+    if _tag_commit(WERKZEUG_REPO, token, name):
         raise ValueError(f"Den Tag {name} gibt es schon. Erst VERSION in signier_werkzeug.py erhöhen und committen.")
     _gh(f"/repos/{WERKZEUG_REPO}/git/refs", token, "POST", {"ref": f"refs/tags/{name}", "sha": stand})
     return version, stand
@@ -448,20 +1063,39 @@ def werkzeug_bau_starten(token):
 def _gh_hochladen(release_id, name, daten, token):
     url = (f"https://uploads.github.com/repos/{WERKZEUG_REPO}/releases/{int(release_id)}/assets"
            f"?name={urllib.parse.quote(name)}")
-    req = urllib.request.Request(url, data=daten, method="POST", headers={
-        "Accept": "application/vnd.github+json", "User-Agent": PROGRAMM, "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json", "X-GitHub-Api-Version": "2022-11-28"})
+    kopf = {"Accept": "application/vnd.github+json", "Content-Type": "application/json", "X-GitHub-Api-Version": "2022-11-28"}
     try:
-        with urllib.request.urlopen(req, timeout=120) as r:
-            r.read(1024 * 1024)
-    except urllib.error.HTTPError as e:
-        raise ValueError(f"SIGNATUR.json konnte nicht hochgeladen werden (GitHub-Fehler {e.code}).")
-    except OSError as e:
-        raise ValueError(f"GitHub nicht erreichbar ({e.__class__.__name__}).")
+        _anfrage(url, token, "POST", daten, kopf, timeout=120, limit=MB)
+    except HttpFehler as e:
+        raise ValueError(f"SIGNATUR.json konnte nicht hochgeladen werden (GitHub-Fehler {e.code}).") from None
+
+
+def entwurf_herkunft(rel, token, exe):
+    """Herkunft des Entwurfs prüfen, bevor er signiert wird -> Commit.
+    - Prüfsumme der geladenen exe = die vom Bau in den Release-Text geschriebene
+      (und = der von GitHub ermittelte Digest der Datei, falls angegeben),
+    - der Tag zeigt genau auf den Commit, aus dem gebaut wurde,
+    - dieser Commit liegt auf main (kein Bau aus einem fremden Zweig)."""
+    text = str(rel.get("body") or "")
+    m_commit = re.search(r"Commit ([0-9a-f]{40})", text)
+    m_summe = re.search(r"SHA-256 der exe: ([0-9a-f]{64})", text)
+    if not m_commit or not m_summe:
+        raise ValueError("Der Entwurf stammt nicht erkennbar aus dem Bau (Commit oder Prüfsumme fehlen) - nicht signiert.")
+    summe = hashlib.sha256(exe).hexdigest()
+    digest = str((_asset(rel, EXE_NAME) or {}).get("digest") or "")
+    if summe != m_summe.group(1) or (digest and digest != "sha256:" + summe):
+        raise ValueError("Die exe im Entwurf passt nicht zur Prüfsumme aus dem Bau - nicht signiert.")
+    commit = m_commit.group(1)
+    if _tag_commit(WERKZEUG_REPO, token, str(rel.get("tag_name") or "")) != commit:
+        raise ValueError("Der Tag des Entwurfs zeigt nicht auf den gebauten Commit - nicht signiert.")
+    vergleich = _gh(f"/repos/{WERKZEUG_REPO}/compare/{commit}...main", token)
+    if vergleich.get("status") not in ("ahead", "identical"):
+        raise ValueError("Der gebaute Commit liegt nicht auf main - nicht signiert.")
+    return commit
 
 
 def werkzeug_veroeffentlichen(profil, kennwort, token):
-    """Entwurf laden, prüfen, signieren, SIGNATUR.json anhängen, veröffentlichen."""
+    """Entwurf laden, Herkunft prüfen, signieren, SIGNATUR.json anhängen, veröffentlichen."""
     privat = privat_laden(schluessel_pfad(profil), kennwort)
     if oeffentlich_text(privat) != WERKZEUG_SCHLUESSEL:
         raise ValueError("Dieser Schlüssel passt nicht zum eingebauten Schlüssel des Werkzeugs.")
@@ -469,6 +1103,7 @@ def werkzeug_veroeffentlichen(profil, kennwort, token):
     version = rel["tag_name"].lstrip("v")
     exe = _herunterladen(_asset(rel, EXE_NAME)["url"], token)
     _exe_plausibel(exe)
+    commit = entwurf_herkunft(rel, token, exe)
     inhalt = werkzeug_signatur_inhalt(privat, version, exe)
     werkzeug_signatur_pruefen(inhalt.encode("utf-8"), exe, version)
     alt = _asset(rel, SIGNATUR_DATEI)
@@ -476,7 +1111,7 @@ def werkzeug_veroeffentlichen(profil, kennwort, token):
         _gh(f"/repos/{WERKZEUG_REPO}/releases/assets/{int(alt['id'])}", token, "DELETE", roh=True)
     _gh_hochladen(rel["id"], SIGNATUR_DATEI, inhalt.encode("utf-8"), token)
     _gh(f"/repos/{WERKZEUG_REPO}/releases/{int(rel['id'])}", token, "PATCH", {"draft": False, "make_latest": "true"})
-    return version, hashlib.sha256(exe).hexdigest()
+    return version, hashlib.sha256(exe).hexdigest(), commit
 
 
 def werkzeug_neueste():
@@ -511,19 +1146,23 @@ def werkzeug_update():
     sig = _herunterladen(a_sig["browser_download_url"], limit=256 * 1024)
     _exe_plausibel(exe)
     werkzeug_signatur_pruefen(sig, exe, version)
-    neu, alt = exe_pfad + ".neu", exe_pfad + ".alt"
-    with open(neu, "wb") as f:
-        f.write(exe)
+    ordner, name = os.path.split(exe_pfad)
+    neu, alt = os.path.join(ordner, _tmp_name(name)), exe_pfad + ".alt"
     try:
-        if os.path.exists(alt):
-            os.remove(alt)
+        neu_anlegen(neu, exe, 0o755)   # exklusiv, zufälliger Name: kein untergeschobenes Ziel
+        if regulaer_lesen(neu, _EXE_MAX + 1) != exe:
+            raise OSError("geschriebene Datei weicht ab")
+        if os.path.lexists(alt):
+            if _art(os.lstat(alt)) == "ordner":
+                raise OSError(f"{os.path.basename(alt)} ist ein Ordner")
+            os.remove(alt)   # entfernt nur den Eintrag (auch eine Verknüpfung selbst)
         os.replace(exe_pfad, alt)   # laufende exe darf umbenannt, aber nicht überschrieben werden
         try:
             os.replace(neu, exe_pfad)
         except OSError:
             os.replace(alt, exe_pfad)
             raise
-    except OSError as e:
+    except (OSError, ValueError) as e:
         try:
             os.remove(neu)
         except OSError:
@@ -538,7 +1177,7 @@ def _alte_exe_entfernen():
         return
     alt = sys.executable + ".alt"
     for _ in range(30):
-        if not os.path.exists(alt):
+        if not os.path.lexists(alt):
             return
         try:
             os.remove(alt)
@@ -593,8 +1232,20 @@ def _ansicht(d):
         profile.append({**{k: p.get(k) for k in ("id", "name", "oeffentlich", "regel", "ausschluss", "repo", "zweig")},
                         "hat_schluessel": hat})
     alt = os.path.join(os.path.expanduser("~"), "speedrace-signatur-privat.pem")
-    return {"profile": profile, "token": bool(d.get("github_token")), "version": VERSION,
+    wert = str(d.get("github_token") or "")
+    gespeichert = ("dpapi" if wert.startswith("dpapi:") else "schluesselbund" if wert == "keyring:"
+                   else "klartext" if wert.startswith("klar:") else "sitzung" if _sitzung["token"] else "")
+    return {"profile": profile, "token": bool(gespeichert), "token_speicher": gespeichert,
+            "token_methode": token_speicher_art(), "version": VERSION,
             "daten": daten_ordner(), "alter_schluessel": alt if os.path.isfile(alt) else ""}
+
+
+def _token_meldung(d):
+    art = _ansicht(d)["token_speicher"]
+    return {"dpapi": "Token gespeichert (mit Windows-DPAPI verschlüsselt, nur für deinen Windows-Benutzer lesbar).",
+            "schluesselbund": "Token im Schlüsselbund des Betriebssystems gespeichert.",
+            "sitzung": "Kein sicherer Speicher verfügbar: Das Token gilt nur für diese Sitzung (Arbeitsspeicher) "
+                       "und wird nicht dauerhaft gespeichert - nach einem Neustart erneut eingeben."}.get(art, "Token gespeichert.")
 
 
 def aktion(name, p):
@@ -635,26 +1286,26 @@ def aktion(name, p):
             kw = str(p.get("kennwort") or "")
             if len(kw) < 12:
                 raise ValueError("Das Kennwort braucht mindestens 12 Zeichen.")
-            if os.path.isfile(schluessel_pfad(pr)):
+            if os.path.lexists(schluessel_pfad(pr)):
                 raise ValueError("Das Profil hat schon einen Schlüssel - für einen neuen bitte ein neues Profil anlegen.")
             privat = Ed25519PrivateKey.generate()
             pem = privat.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                        serialization.BestAvailableEncryption(kw.encode("utf-8")))
-            fd = os.open(schluessel_pfad(pr), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "wb") as f:
-                f.write(pem)
+            neu_anlegen(schluessel_pfad(pr), pem, 0o600)
             pr["oeffentlich"] = oeffentlich_text(privat)
             profile_speichern(d)
             return {**_ansicht(d), "meldung": "Schlüssel erzeugt. Bitte die Schlüsseldatei zusätzlich sichern (USB-Stick)."}
         if name == "schluessel_import":
             pr = _profil(d, p.get("id"))
             quelle = str(p.get("pfad") or "").strip().strip('"')
-            if not os.path.isfile(quelle):
+            try:
+                pem = regulaer_lesen(quelle, 64 * 1024)
+            except OSError:
                 raise ValueError("Datei nicht gefunden.")
-            privat = privat_laden(quelle, str(p.get("kennwort") or ""))
-            if os.path.isfile(schluessel_pfad(pr)):
+            privat = _privat_aus_pem(pem, str(p.get("kennwort") or ""))
+            if os.path.lexists(schluessel_pfad(pr)):
                 raise ValueError("Das Profil hat schon einen Schlüssel.")
-            shutil.copyfile(quelle, schluessel_pfad(pr))
+            neu_anlegen(schluessel_pfad(pr), pem, 0o600)   # exklusiv, folgt keiner Verknüpfung
             pr["oeffentlich"] = oeffentlich_text(privat)
             profile_speichern(d)
             return {**_ansicht(d), "meldung": "Schlüssel übernommen. Die ursprüngliche Datei bleibt, wo sie ist."}
@@ -662,9 +1313,21 @@ def aktion(name, p):
             t = str(p.get("token") or "").strip()
             if t and not re.fullmatch(r"[A-Za-z0-9_]{20,255}", t):
                 raise ValueError("Das sieht nicht wie ein GitHub-Token aus.")
+            if not t:
+                geheim_entfernen()
             d["github_token"] = geheim_speichern(t) if t else ""
             profile_speichern(d)
-            return {**_ansicht(d), "meldung": "Token gespeichert (verschlüsselt)." if t else "Token entfernt."}
+            return {**_ansicht(d), "meldung": _token_meldung(d) if t else "Token entfernt."}
+        if name == "token_migrieren":
+            wert = str(d.get("github_token") or "")
+            if not wert.startswith("klar:"):
+                raise ValueError("Es ist kein unsicher gespeichertes Token vorhanden.")
+            t = geheim_lesen(wert)
+            if not t:
+                raise ValueError("Das alte Token ist nicht lesbar - bitte entfernen und neu eingeben.")
+            d["github_token"] = geheim_speichern(t)
+            profile_speichern(d)
+            return {**_ansicht(d), "meldung": "Altes Klartext-Token übernommen: " + _token_meldung(d)}
         if name == "ordner_waehlen":
             return {"pfad": ordner_waehlen()}
         if name == "datei_waehlen":
@@ -698,10 +1361,9 @@ def aktion(name, p):
     if name == "werkzeug_veroeffentlichen":
         if not token:
             raise ValueError("Zum Veröffentlichen wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
-        version, summe = werkzeug_veroeffentlichen(pr, str(p.get("kennwort") or ""), token)
-        return {"ok": True, "meldung": f"Signier-Werkzeug {version} signiert und veröffentlicht (SHA-256 {summe[:16]}…). "
-                                       "Andere Installationen bieten das Update jetzt an."}
-        token = geheim_lesen(d.get("github_token"))
+        version, summe, commit = werkzeug_veroeffentlichen(pr, str(p.get("kennwort") or ""), token)
+        return {"ok": True, "meldung": f"Signier-Werkzeug {version} aus Commit {commit[:7]} signiert und veröffentlicht "
+                                       f"(SHA-256 {summe}). Andere Installationen bieten das Update jetzt an."}
     # Lange Arbeiten ohne Sperre
     if name == "signieren_ordner":
         ordner = str(p.get("ordner") or "").strip().strip('"')
@@ -725,6 +1387,7 @@ def aktion(name, p):
             if not token:
                 raise ValueError("Zum Hochladen wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
             version, anzahl, inhalt = signieren(ordner, pr, str(p.get("kennwort") or ""))
+            github_tag_frei(pr["repo"], token, version, stand)
             commit = github_hochladen(pr["repo"], pr.get("zweig") or "main", token, inhalt, version, stand)
             try:
                 tag = github_tag_setzen(pr["repo"], token, version, commit)
@@ -800,9 +1463,9 @@ class Server:
                     if antwort.get("neustart"):
                         threading.Thread(target=server.neu_starten, daemon=True).start()
                 except ValueError as e:
-                    self._senden(400, json.dumps({"fehler": str(e)}, ensure_ascii=False))
+                    self._senden(400, json.dumps({"fehler": schwaerzen(e)}, ensure_ascii=False))
                 except Exception as e:
-                    self._senden(500, json.dumps({"fehler": f"Unerwarteter Fehler: {e.__class__.__name__}: {e}"},
+                    self._senden(500, json.dumps({"fehler": schwaerzen(f"Unerwarteter Fehler: {e.__class__.__name__}: {e}")},
                                                  ensure_ascii=False))
         return H
 
@@ -833,8 +1496,71 @@ class Server:
         self.httpd.serve_forever()
 
 
+def _sicherheit_selbsttest(tmp):
+    """Für den Bau unter Windows: ZIP-Pfade, Kollisionen, atomares Schreiben.
+    -> Liste der Fehler (leer = alles in Ordnung)."""
+    import io
+    fehler = []
+
+    def zip_mit(namen):
+        puffer = io.BytesIO()
+        with zipfile.ZipFile(puffer, "w") as z:
+            z.writestr("repo-abc/", "")
+            for n in namen:
+                z.writestr("repo-abc/" + n, "x")
+        puffer.seek(0)
+        return puffer
+    aussen = os.path.join(tmp, "aussen")
+    os.makedirs(aussen)
+    vorher = sorted(os.listdir(aussen))
+    for name in ["../ausserhalb.txt", "..\\..\\ausserhalb.txt", "/absolut/datei", "C:\\Windows\\datei", "C:..\\..\\datei",
+                 "C:datei", "\\\\server\\share\\datei", "a/../../datei", "CON", "aux.txt", "datei. ", "a:b"]:
+        ziel = tempfile.mkdtemp(dir=aussen)
+        try:
+            zip_entpacken(zip_mit([name]), ziel)
+            fehler.append(f"zip:{name!r} angenommen")
+        except ValueError:
+            pass
+        if os.listdir(ziel):
+            fehler.append(f"zip:{name!r} hat Dateien hinterlassen")
+        shutil.rmtree(ziel)
+    if sorted(os.listdir(aussen)) != vorher or os.path.exists(os.path.join(tmp, "ausserhalb.txt")):
+        fehler.append("zip: Datei außerhalb geschrieben")
+    ziel = tempfile.mkdtemp(dir=aussen)
+    try:
+        zip_entpacken(zip_mit(["A.txt", "a.txt"]), ziel)
+        fehler.append("zip: Groß/Klein-Kollision angenommen")
+    except ValueError:
+        pass
+    ziel = tempfile.mkdtemp(dir=aussen)
+    try:
+        if zip_entpacken(zip_mit(["ordner/datei.txt", "b.txt"]), ziel) != 2 \
+                or open(os.path.join(ziel, "ordner", "datei.txt")).read() != "x":
+            fehler.append("zip: gutes Archiv falsch entpackt")
+    except ValueError as e:
+        fehler.append(f"zip: gutes Archiv abgelehnt ({e})")
+    ordner = tempfile.mkdtemp(dir=tmp)
+    try:
+        atomar_schreiben(ordner, SIGNATUR_DATEI, b"eins")
+        atomar_schreiben(ordner, SIGNATUR_DATEI, b"zwei")
+        if open(os.path.join(ordner, SIGNATUR_DATEI), "rb").read() != b"zwei" or len(os.listdir(ordner)) != 1:
+            fehler.append("atomar: falscher Stand")
+        os.mkdir(os.path.join(ordner, "x.json"))
+        try:
+            atomar_schreiben(ordner, "x.json", b"1")
+            fehler.append("atomar: Ordner am Ziel überschrieben")
+        except ValueError:
+            pass
+        if sorted(os.listdir(ordner)) != [SIGNATUR_DATEI, "x.json"]:
+            fehler.append("atomar: temporäre Datei liegen geblieben")
+    except (OSError, ValueError) as e:
+        fehler.append(f"atomar: {e.__class__.__name__}: {e}")
+    return fehler
+
+
 def selbsttest(ausgabe):
-    """Für den Bau: signiert und prüft einen Testordner, Ergebnis in eine Datei."""
+    """Für den Bau: signiert und prüft einen Testordner und prüft die
+    Sicherheitsregeln (unter Windows), Ergebnis in eine Datei."""
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     with tempfile.TemporaryDirectory() as tmp:
@@ -850,7 +1576,10 @@ def selbsttest(ausgabe):
         dp = ""
         if os.name == "nt":
             dp = " dpapi=" + str(geheim_lesen(geheim_speichern("probe")) == "probe")
-        open(ausgabe, "w").write(("OK" if r["ok"] else "FEHLER " + json.dumps(r)) + dp + "\n")
+        fehler = _sicherheit_selbsttest(tmp)
+        ergebnis = "OK" if r["ok"] and not fehler else "FEHLER " + json.dumps({"pruefung": r, "sicherheit": fehler},
+                                                                             ensure_ascii=False)
+        open(ausgabe, "w", encoding="utf-8").write(ergebnis + dp + " sicherheit=" + ("ok" if not fehler else "fehler") + "\n")
 
 
 SEITE = r"""<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -936,7 +1665,11 @@ Version __VERSION__ <button class="zweit" id="beenden">Beenden</button></div></h
  <div class="karte"><h2>GitHub-Zugang</h2>
   <div class="hinweis">Zum Hochladen von SIGNATUR.json braucht das Werkzeug ein Token: GitHub → Settings → Developer settings →
   Fine-grained tokens → „Generate new token“ → Repository access: nur die betroffenen Repositories → Permissions:
-  <b>Contents: Read and write</b>. Es wird nur auf diesem Rechner gespeichert, verschlüsselt für deinen Windows-Benutzer.</div>
+  <b>Contents: Read and write</b>. Unter Windows wird es mit DPAPI verschlüsselt (nur für deinen Windows-Benutzer lesbar),
+  sonst im Schlüsselbund des Betriebssystems - gibt es keinen sicheren Speicher, gilt es nur für diese Sitzung.</div>
+  <div class="status fehler versteckt" id="g-klartext">⚠️ Das gespeicherte Token liegt aus einer älteren Version nur
+  Base64-kodiert in profile.json - das ist <b>keine Verschlüsselung</b>. <div class="zeile" style="margin-top:8px">
+  <button id="g-migrieren">Sicher speichern</button><button class="zweit" id="g-alt-weg">Entfernen</button></div></div>
   <div class="zeile" style="margin-top:10px"><div><label for="g-token">Token</label><input id="g-token" type="password" autocomplete="off" placeholder="github_pat_…"></div>
   <button id="g-speichern">Speichern</button><button class="zweit" id="g-entfernen">Entfernen</button></div>
   <div class="hinweis" id="g-stand" style="margin-top:8px"></div><div class="status" id="g-status"></div></div>
@@ -989,7 +1722,12 @@ function zeichnen() {
     try { Z = await api("profil_loeschen", {id: p.id}); zeichnen(); $("bearbeiten").classList.add("versteckt"); } catch (e) { alert(e.message); }
   });
   $("datenpfad").textContent = Z.daten || "";
-  $("g-stand").textContent = Z.token ? "✓ Ein Token ist gespeichert." : "Noch kein Token gespeichert.";
+  const ART = {dpapi: "mit Windows-DPAPI verschlüsselt gespeichert", schluesselbund: "im Schlüsselbund des Betriebssystems gespeichert",
+    sitzung: "nur für diese Sitzung im Arbeitsspeicher (nicht dauerhaft)", klartext: "UNSICHER als Klartext gespeichert"};
+  const NEU = {dpapi: "Windows-DPAPI (dauerhaft)", schluesselbund: "Schlüsselbund des Betriebssystems (dauerhaft)", sitzung: "nur diese Sitzung (kein sicherer Speicher verfügbar)"};
+  $("g-stand").textContent = (Z.token ? "✓ Token " + (ART[Z.token_speicher] || "gespeichert") + "." : "Noch kein Token gespeichert.")
+    + " Neues Token wird gespeichert: " + (NEU[Z.token_methode] || "?") + ".";
+  $("g-klartext").classList.toggle("versteckt", Z.token_speicher !== "klartext");
   profilInfo();
 }
 function profilInfo() {
@@ -1073,7 +1811,8 @@ $("s-ordner-los").onclick = async e => {
 function pruefErgebnis(d) {
   const r = d.pruefung || {};
   if (r.ok) return status("p-status", "ok", `✅ Signatur gültig – Version ${esc(r.version || "(ohne)")}, alle ${r.anzahl} Dateien passen${d.stand ? " (GitHub-Stand " + esc(d.stand) + ")" : ""}.`);
-  status("p-status", "fehler", "❌ " + esc(r.fehler || "Nicht gültig.") + (r.abweichend && r.abweichend.length ? "<ul>" + r.abweichend.map(n => `<li class="mono">${esc(n)}</li>`).join("") + "</ul>" : ""));
+  const art = r.arten || {};
+  status("p-status", "fehler", "❌ " + esc(r.fehler || "Nicht gültig.") + (r.abweichend && r.abweichend.length ? "<ul>" + r.abweichend.map(n => `<li><span class="mono">${esc(n)}</span>${art[n] ? " (" + esc(art[n]) + ")" : ""}</li>`).join("") + "</ul>" : ""));
 }
 $("p-github").onclick = e => mit("p-status", e.target, "Lade von GitHub und prüfe …", async () => {
   const p = Z.profile.find(x => x.id === $("p-profil").value); if (!p || !p.oeffentlich) throw new Error("Profil ohne Schlüssel.");
@@ -1084,6 +1823,10 @@ $("p-ordner-los").onclick = e => mit("p-status", e.target, "Prüfe …", async (
 $("g-speichern").onclick = e => mit("g-status", e.target, "Speichere …", async () => {
   Z = await api("token_speichern", {token: $("g-token").value}); $("g-token").value = ""; zeichnen(); status("g-status", "ok", "✅ " + esc(Z.meldung)); });
 $("g-entfernen").onclick = e => mit("g-status", e.target, "Entferne …", async () => {
+  Z = await api("token_speichern", {token: ""}); zeichnen(); status("g-status", "ok", "✅ " + esc(Z.meldung)); });
+$("g-migrieren").onclick = e => mit("g-status", e.target, "Übernehme …", async () => {
+  Z = await api("token_migrieren"); zeichnen(); status("g-status", "ok", "✅ " + esc(Z.meldung)); });
+$("g-alt-weg").onclick = e => mit("g-status", e.target, "Entferne …", async () => {
   Z = await api("token_speichern", {token: ""}); zeichnen(); status("g-status", "ok", "✅ " + esc(Z.meldung)); });
 $("beenden").onclick = async () => { try { await api("beenden"); } catch (e) {} document.body.innerHTML = '<main><div class="karte"><h2>Beendet</h2>Das Fenster kann geschlossen werden.</div></main>'; };
 setInterval(() => api("ping").catch(() => {}), 20000);
