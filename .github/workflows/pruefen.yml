@@ -1,5 +1,8 @@
 # Sicherheitstests bei jedem Push und Pull Request - unter Linux und Windows
 # (Pfadregeln, ZIP-Import, Symlinks, Weiterleitungen, Token-Speicher).
+# ubuntu-26.04 läuft zusätzlich mit, weil ubuntu-latest darauf umgestellt wird;
+# der Job "release-werkzeuge" stellt die Schritte des Release-Jobs aus bauen.yml
+# nach (Artefakt-Übergabe, Prüfsummenvergleich, Notizen, gh), ohne etwas zu veröffentlichen.
 # Nur Leserechte, keine Secrets, kein pull_request_target.
 name: Pruefen
 
@@ -16,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-26.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -40,3 +43,51 @@ jobs:
 
       - name: Selbsttest (Quelltext)
         run: python signier_werkzeug.py --selbsttest selbst.txt && python -c "import sys; t=open('selbst.txt', encoding='utf-8').read(); print(t); sys.exit(0 if t.startswith('OK') else 1)"
+
+  release-werkzeuge:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Probedatei
+        run: mkdir -p probe && head -c 1048576 /dev/urandom > probe/Signier-Werkzeug.exe
+
+      - name: Prüfsumme (wie im Bau)
+        id: summe
+        run: echo "sha256=$(sha256sum probe/Signier-Werkzeug.exe | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: probe-${{ matrix.os }}
+          path: probe/Signier-Werkzeug.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: probe-${{ matrix.os }}
+          path: dist
+
+      - name: Prüfsumme gegen den Bau abgleichen (wie im Release-Job)
+        env:
+          ERWARTET: ${{ steps.summe.outputs.sha256 }}
+        run: |
+          ist=$(sha256sum dist/Signier-Werkzeug.exe | cut -d' ' -f1)
+          echo "SHA-256 der exe: $ist"
+          if [ -z "$ERWARTET" ] || [ "$ist" != "$ERWARTET" ]; then echo "Prüfsumme weicht vom Bau ab"; exit 1; fi
+          echo "${#ist}" | grep -qx 64
+
+      - name: Notizen und gh (wie im Release-Job, ohne Veröffentlichung)
+        env:
+          COMMIT: ${{ github.sha }}
+          SUMME: ${{ steps.summe.outputs.sha256 }}
+        run: |
+          printf 'Ungeprüfter Entwurf aus Commit %s.\n\nSHA-256 der exe: %s\n' "$COMMIT" "$SUMME" > notizen.txt
+          grep -Eq "^Ungeprüfter Entwurf aus Commit [0-9a-f]{40}\.$" notizen.txt
+          grep -Eq "^SHA-256 der exe: [0-9a-f]{64}$" notizen.txt
+          gh --version
+          gh release create --help | grep -q -- "--verify-tag"
+          gh release create --help | grep -q -- "--notes-file"
+          cat /etc/os-release | grep -E "^(PRETTY_NAME|VERSION_ID)="
