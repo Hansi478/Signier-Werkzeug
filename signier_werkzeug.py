@@ -423,6 +423,28 @@ def werkzeug_entwurf(token):
     return max(entwuerfe, key=lambda r: _version_tupel(r["tag_name"].lstrip("v")))
 
 
+def werkzeug_bau_starten(token):
+    """Tag v<VERSION> auf den neuesten Stand von main setzen -> (Version, Commit).
+    Die Version kommt aus signier_werkzeug.py auf main; GitHub baut daraufhin
+    den Entwurf. Ein vorhandener Tag wird nie verschoben."""
+    stand = _zweig_stand(WERKZEUG_REPO, "main", token)
+    datei = _gh(f"/repos/{WERKZEUG_REPO}/contents/signier_werkzeug.py?ref={stand}", token)
+    quelltext = base64.b64decode(datei.get("content") or "").decode("utf-8", "replace")
+    m = re.search(r'^VERSION = "(.+)"', quelltext, re.M)
+    version = m.group(1) if m else ""
+    if not _version_tupel(version):
+        raise ValueError("In signier_werkzeug.py auf main steht keine gültige VERSION.")
+    name = f"v{version}"
+    try:
+        vorhanden = _gh(f"/repos/{WERKZEUG_REPO}/git/ref/tags/{name}", token)
+    except ValueError:
+        vorhanden = None
+    if isinstance(vorhanden, dict) and vorhanden.get("object"):
+        raise ValueError(f"Den Tag {name} gibt es schon. Erst VERSION in signier_werkzeug.py erhöhen und committen.")
+    _gh(f"/repos/{WERKZEUG_REPO}/git/refs", token, "POST", {"ref": f"refs/tags/{name}", "sha": stand})
+    return version, stand
+
+
 def _gh_hochladen(release_id, name, daten, token):
     url = (f"https://uploads.github.com/repos/{WERKZEUG_REPO}/releases/{int(release_id)}/assets"
            f"?name={urllib.parse.quote(name)}")
@@ -656,7 +678,7 @@ def aktion(name, p):
                 raise ValueError("Kein Profil mit dem Schlüssel des Herausgebers (" + WERKZEUG_SCHLUESSEL[:8] + "…) gefunden.")
             pr = dict(pr)
         else:
-            pr = _profil(d, p.get("id")) if name not in ("update_suchen", "update_einspielen") else None
+            pr = _profil(d, p.get("id")) if name not in ("update_suchen", "update_einspielen", "werkzeug_bau_starten") else None
         token = geheim_lesen(d.get("github_token"))
     if name == "update_suchen":
         version, _rel = werkzeug_neueste()
@@ -667,6 +689,12 @@ def aktion(name, p):
         version = werkzeug_update()
         return {"ok": True, "version": version, "neustart": True,
                 "meldung": f"Version {version} geprüft und eingespielt – das Werkzeug startet neu (neues Browserfenster)."}
+    if name == "werkzeug_bau_starten":
+        if not token:
+            raise ValueError("Zum Starten des Baus wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
+        version, stand = werkzeug_bau_starten(token)
+        return {"ok": True, "meldung": f"Tag v{version} auf {stand[:7]} gesetzt. GitHub baut jetzt unter „Actions“ "
+                                       "(einige Minuten), danach hier „Neuen Entwurf signieren und veröffentlichen“."}
     if name == "werkzeug_veroeffentlichen":
         if not token:
             raise ValueError("Zum Veröffentlichen wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
@@ -914,9 +942,10 @@ Version __VERSION__ <button class="zweit" id="beenden">Beenden</button></div></h
   <div class="hinweis" id="g-stand" style="margin-top:8px"></div><div class="status" id="g-status"></div></div>
  <div class="karte"><h2>Signier-Werkzeug selbst</h2>
   <div class="hinweis">Updates kommen aus <span class="mono">__REPO__</span> und werden nur mit gültiger Signatur
-  (Schlüssel des Herausgebers) eingespielt. Neue Version veröffentlichen: im Repository den Tag setzen (z. B. <span class="mono">v1.2.1</span>),
-  warten, bis GitHub unter „Actions“ fertig gebaut hat, dann hier signieren. Erst danach sehen andere Installationen das Update.</div>
+  (Schlüssel des Herausgebers) eingespielt. Neue Version veröffentlichen: VERSION in <span class="mono">signier_werkzeug.py</span> erhöhen und nach main committen,
+  hier „Bau starten“ (setzt den Tag, z. B. <span class="mono">v1.2.1</span>), warten, bis GitHub unter „Actions“ fertig gebaut hat, dann hier signieren. Erst danach sehen andere Installationen das Update.</div>
   <div class="zeile" style="margin-top:10px"><button class="zweit" id="w-suchen">Nach Update suchen</button>
+  <button class="zweit" id="w-bauen">Bau starten (Tag setzen)</button>
   <button id="w-veroeff">Neuen Entwurf signieren und veröffentlichen</button></div>
   <div class="status" id="w-status"></div></div>
 </section>
@@ -1074,6 +1103,11 @@ $("w-suchen").onclick = e => mit("w-status", e.target, "Frage GitHub …", async
   const d = await api("update_suchen"); updateZeigen(d);
   status("w-status", "ok", d.neuer ? `✅ Version ${esc(d.version)} ist verfügbar – oben auf „Update auf ${esc(d.version)}“ klicken.`
     : `✅ Aktuell (Version ${esc(d.aktuell)}${d.version ? ", neueste veröffentlichte " + esc(d.version) : ", noch nichts veröffentlicht"}).`); });
+$("w-bauen").onclick = e => {
+  if (!confirm("Tag v<VERSION> auf den neuesten Stand von main setzen? Die Version kommt aus signier_werkzeug.py auf main. GitHub baut daraufhin den Entwurf.")) return;
+  mit("w-status", e.target, "Setze Tag …", async () => {
+    const d = await api("werkzeug_bau_starten"); status("w-status", "ok", "✅ " + esc(d.meldung)); });
+};
 $("w-veroeff").onclick = async e => {
   const kw = await kennwort("Neuesten Entwurf des Signier-Werkzeugs von GitHub laden, signieren und veröffentlichen (Schlüssel des Herausgebers).");
   if (kw === null) return;

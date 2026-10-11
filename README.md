@@ -24,9 +24,12 @@ Schlüssel und ersetzt das Programm. Ohne gültige Signatur wird nichts verände
 
 ## Neue Version veröffentlichen (Herausgeber)
 
-1. `VERSION` in `signier_werkzeug.py` erhöhen, committen.
-2. Tag setzen, z. B. `v1.2.1`. GitHub baut die exe unter „Actions“ (feste Paketversionen
-   mit Prüfsummen, Selbsttest) und legt sie als **Entwurf** ab.
+1. `VERSION` in `signier_werkzeug.py` erhöhen, nach `main` committen.
+2. Im Signier-Werkzeug: Reiter „GitHub“ → „Bau starten (Tag setzen)“. Das Werkzeug liest
+   `VERSION` aus `signier_werkzeug.py` auf `main` und setzt den Tag, z. B. `v1.2.1`, auf
+   diesen Stand (ein vorhandener Tag wird nie verschoben). Alternativ den Tag von Hand
+   setzen. GitHub baut die exe unter „Actions“ (feste Paketversionen mit Prüfsummen,
+   Selbsttest) und legt sie als **Entwurf** ab.
 3. Im Signier-Werkzeug: Reiter „GitHub“ → „Neuen Entwurf signieren und veröffentlichen“
    → Kennwort. Das Werkzeug lädt die exe, signiert sie, hängt `SIGNATUR.json` an und
    veröffentlicht das Release. Erst jetzt sehen andere Installationen das Update.

@@ -29,7 +29,7 @@ jobs:
           if ("v$v" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} passt nicht zu VERSION $v im Quelltext" }
 
       - name: Pakete (feste Versionen mit Prüfsummen)
-        run: python -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r bau-anforderungen.txt
+        run: "python -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r bau-anforderungen.txt"
 
       - name: Bauen
         run: python -m PyInstaller --noconfirm --onefile --noconsole --name Signier-Werkzeug --icon signier.ico --hidden-import cryptography.hazmat.primitives.asymmetric.ed25519 signier_werkzeug.py
