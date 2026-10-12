@@ -1,0 +1,37 @@
+# Wöchentliche Sicherheitsprüfung (und auf Knopfdruck unter "Actions"):
+# 1. Alle Bau-Pakete aus requirements-bau.txt gegen die Schwachstellen-
+#    Datenbank (pip-audit, Abfrage bei PyPI/OSV - es wird nichts installiert).
+# 2. Die in bauen.yml festgelegte Python-Version gegen die neueste Version
+#    derselben Reihe, die es für Windows (x64) gibt - diese Laufzeit steckt in der exe.
+# Bei einem Fund schlägt der Lauf fehl; GitHub schickt dann eine E-Mail.
+# Nur Leserechte, keine Secrets.
+name: Sicherheitspruefung
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pruefen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14.8"
+
+      - name: pip-audit
+        run: python -m pip install --disable-pip-version-check "pip-audit==2.10.1"
+
+      - name: Bau-Pakete auf bekannte Schwachstellen prüfen
+        run: python -m pip_audit --requirement requirements-bau.txt --require-hashes --disable-pip --progress-spinner off
+
+      - name: Python-Laufzeit der exe aktuell?
+        run: python tools/python_aktuell.py .github/workflows/bauen.yml

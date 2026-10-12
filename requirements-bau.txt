@@ -1,7 +1,8 @@
-# Feste Versionen mit Prüfsummen für den Bau unter Windows (Python 3.12, 64 Bit).
-# Installiert mit: python -m pip install --require-hashes --only-binary=:all: -r bau-anforderungen.txt
+# Feste Versionen mit Prüfsummen für den Bau unter Windows (Python 3.14, 64 Bit).
+# Dependabot schlägt neue Versionen (inkl. Prüfsummen) als Pull Request vor.
+# Installiert mit: python -m pip install --require-hashes --only-binary=:all: -r requirements-bau.txt
 altgraph==0.17.5 --hash=sha256:f3a22400bce1b0c701683820ac4f3b159cd301acab067c51c653e06961600597
-cffi==2.1.1 --hash=sha256:f53e442b08449d42821fa4a4fba000095af9f62742a500f978a9f557ec44339a
+cffi==2.1.1 --hash=sha256:3222ba5d678f80a030e6afbcc33dc1ae5cb45facabb61cee2c7016b8432fde48
 cryptography==50.0.2 --hash=sha256:7afa5a6602a9f29af1f3a2965f831bae7c9d5d597b7cbb716d41ab3b7d89879c
 packaging==26.3 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
 pefile==2024.8.26 --hash=sha256:76f8b485dcd3b1bb8166f1128d395fa3d87af26360c2358fb75b80019b957c6f

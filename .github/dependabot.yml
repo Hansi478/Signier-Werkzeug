@@ -1,7 +1,9 @@
-# Dependabot prüft monatlich, ob es neue Versionen der GitHub Actions gibt,
-# und schlägt jede Aktualisierung als Pull Request vor. Die Festlegung auf
-# Commit-SHAs bleibt erhalten (neuer SHA + Versions-Kommentar); die Tests in
-# pruefen.yml laufen auf jedem Vorschlag. Übernommen wird nur nach Prüfung.
+# Dependabot schlägt neue Versionen als Pull Request vor - für die GitHub
+# Actions (Festlegung auf Commit-SHAs bleibt, neuer SHA + Versions-Kommentar)
+# und für die Bau-Pakete in requirements-bau.txt (feste Versionen mit
+# Prüfsummen). Die Tests in pruefen.yml laufen auf jedem Vorschlag; übernommen
+# wird nur nach Prüfung. Sicherheitslücken meldet Dependabot sofort, wenn in den
+# Repository-Einstellungen "Dependabot alerts" und "security updates" an sind.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
@@ -14,3 +16,14 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: "Actions"
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    groups:
+      bau-pakete:
+        patterns: ["*"]
+    commit-message:
+      prefix: "Bau-Pakete"

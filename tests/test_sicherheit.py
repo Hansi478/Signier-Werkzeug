@@ -850,7 +850,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_workflows(self):
         import re
-        for name in ("bauen.yml", "pruefen.yml"):
+        for name in ("bauen.yml", "pruefen.yml", "sicherheit.yml"):
             with self.subTest(name=name):
                 text = self.lesen(name)
                 code = "\n".join(z for z in text.splitlines() if not z.lstrip().startswith("#"))
@@ -870,7 +870,42 @@ class WorkflowTests(unittest.TestCase):
         with open(os.path.join(WURZEL, ".github", "dependabot.yml"), encoding="utf-8") as f:
             text = f.read()
         self.assertIn('package-ecosystem: "github-actions"', text)
+        self.assertIn('package-ecosystem: "pip"', text)
         self.assertIn('directory: "/"', text)
+        self.assertTrue(os.path.isfile(os.path.join(WURZEL, "requirements-bau.txt")), "Dependabot findet die Bau-Pakete nicht")
+
+    def test_python_version_fest_und_einheitlich(self):
+        import re
+        versionen = {n: re.findall(r'python-version:\s*"([^"]+)"', self.lesen(n)) for n in ("bauen.yml", "pruefen.yml", "sicherheit.yml")}
+        alle = {v for vs in versionen.values() for v in vs}
+        self.assertEqual(len(alle), 1, versionen)
+        self.assertRegex(alle.pop(), r"^\d+\.\d+\.\d+$", "Python-Version muss genau festgelegt sein (x.y.z)")
+
+    def test_bau_pakete_mit_pruefsummen(self):
+        with open(os.path.join(WURZEL, "requirements-bau.txt"), encoding="utf-8") as f:
+            zeilen = [z for z in f.read().splitlines() if z.strip() and not z.startswith("#")]
+        self.assertTrue(zeilen)
+        for z in zeilen:
+            self.assertRegex(z, r"^[A-Za-z0-9_.-]+==\S+( --hash=sha256:[0-9a-f]{64})+$", z)
+
+
+class PythonAktuellTests(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("python_aktuell", os.path.join(WURZEL, "tools", "python_aktuell.py"))
+        self.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.m)
+
+    def test_neueste_windows_version(self):
+        win = [{"platform": "win32", "arch": "x64"}]
+        linux = [{"platform": "linux", "arch": "x64"}]
+        manifest = [{"version": "3.14.9", "stable": True, "files": linux},      # nur Quelltext/Linux
+                    {"version": "3.14.8", "stable": True, "files": win + linux},
+                    {"version": "3.14.10rc1", "stable": False, "files": win},
+                    {"version": "3.14.7", "stable": True, "files": win},
+                    {"version": "3.13.20", "stable": True, "files": win}]
+        self.assertEqual(self.m.neueste_windows(manifest, "3.14"), "3.14.8")
+        self.assertIsNone(self.m.neueste_windows(manifest, "3.12"))
+        self.assertEqual(self.m.festgelegt(os.path.join(WURZEL, ".github", "workflows", "bauen.yml")).count("."), 2)
 
 
 if __name__ == "__main__":

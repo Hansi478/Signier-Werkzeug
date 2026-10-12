@@ -53,7 +53,7 @@ jobs:
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: "3.12"
+          python-version: "3.14.8"
           architecture: x64
 
       - name: Tag und VERSION im Quelltext müssen übereinstimmen
@@ -63,7 +63,7 @@ jobs:
           if ("v$v" -ne $env:TAG) { throw "Tag $env:TAG passt nicht zu VERSION $v im Quelltext" }
 
       - name: Pakete (feste Versionen mit Prüfsummen)
-        run: "python -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r bau-anforderungen.txt"
+        run: "python -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements-bau.txt"
 
       - name: Sicherheitstests
         run: python -m unittest discover -s tests -v

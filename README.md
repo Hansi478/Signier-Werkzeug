@@ -82,6 +82,10 @@ python -m unittest discover -s tests -v
 Laufen automatisch bei jedem Push unter Linux und Windows (`.github/workflows/pruefen.yml`)
 und vor jedem Bau.
 
+Jeden Montag prüft `.github/workflows/sicherheit.yml` die Bau-Pakete (`requirements-bau.txt`)
+auf bekannte Schwachstellen und die eingebaute Python-Version auf Aktualität; bei einem Fund
+kommt eine E-Mail von GitHub. Ablauf für Sicherheitsupdates: [SICHERHEIT.md](SICHERHEIT.md).
+
 ## Sicherung
 
 Die privaten Schlüssel liegen mit Kennwort verschlüsselt in

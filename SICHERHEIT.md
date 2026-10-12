@@ -192,6 +192,31 @@ benutzt.
   Neue Versionen schlägt Dependabot monatlich als Pull Request vor
   (`.github/dependabot.yml`); die SHA-Festlegung bleibt dabei erhalten, die
   Tests laufen auf jedem Vorschlag, übernommen wird nur nach Prüfung.
+- Die Bau-Pakete stehen mit festen Versionen und SHA-256-Prüfsummen in
+  `requirements-bau.txt` (`pip --require-hashes`). Auch dafür schlägt
+  Dependabot neue Versionen vor.
+- Die Python-Laufzeit ist genau festgelegt (z. B. `3.14.8`) - sie steckt in der
+  exe. Python 3.12 gibt es seit 3.12.10 nur noch als Quelltext, ohne
+  Windows-Ausgaben; deshalb wird mit 3.14 gebaut, solange diese Reihe
+  Windows-Ausgaben mit Korrekturen bekommt.
+
+### Sicherheitsupdates: wer macht was
+
+- **Erkennen (GitHub, automatisch):**
+  - `sicherheit.yml` läuft jeden Montag (und auf Knopfdruck unter „Actions“):
+    `pip-audit` prüft alle Bau-Pakete gegen die Schwachstellen-Datenbank,
+    `tools/python_aktuell.py` prüft, ob es eine neuere Python-Version der Reihe
+    für Windows gibt. Bei einem Fund schlägt der Lauf fehl; GitHub schickt eine E-Mail.
+  - Dependabot meldet Lücken sofort, wenn in den Repository-Einstellungen
+    (Settings → Code security) „Dependabot alerts“ und „Dependabot security
+    updates“ eingeschaltet sind.
+- **Beheben (Herausgeber):** Pull Request bzw. Versionsnummer anheben, Tests
+  abwarten, zusammenführen, `VERSION` erhöhen, im Werkzeug „Bau starten“.
+- **Signieren (Herausgeber, nur lokal):** im Werkzeug „Neuen Entwurf signieren
+  und veröffentlichen“. Der Schlüssel liegt nie bei GitHub.
+- **Verteilen (automatisch):** Jede Installation bietet beim Start das Update an.
+  Eine Korrektur erreicht die Nutzer nur über ein neues, signiertes Release -
+  die exe tauscht keine eingebauten Pakete selbst aus.
 - Vor dem Bau wird geprüft:
   - Der Tag liegt auf einem Commit von `main`.
   - Tag und `VERSION` stimmen überein.
@@ -276,6 +301,9 @@ auf Attestation, Prüfsumme und Signatur.
 - Das Paket `keyring` ist nicht Teil der Windows-exe, unter Windows wird
   ohnehin DPAPI verwendet. Wer den Quelltext unter macOS/Linux startet,
   installiert es bei Bedarf selbst (`pip install keyring`).
+- Python-Reihen bekommen nur eine begrenzte Zeit Windows-Ausgaben. Meldet die
+  Sicherheitsprüfung „keine Windows-Ausgaben mehr“, muss auf die nächste Reihe
+  gewechselt werden (Pakete mit passenden Wheels, Tests unter Windows).
 - Tag-Ruleset und Unveränderlichkeit von Releases sind Einstellungen des
   Repositorys, nicht des Werkzeugs. Sie sind gesetzt (Abschnitt 6); wer sie
   ändert, hebt den Schutz auf - deshalb mit den Befehlen dort gelegentlich nachprüfen.
