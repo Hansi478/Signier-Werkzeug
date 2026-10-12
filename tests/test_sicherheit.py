@@ -866,6 +866,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("contents: write", bauen.split("entwurf:")[0])
         self.assertIn("--verify-tag", bauen)
 
+    def test_dependabot_fuer_actions(self):
+        with open(os.path.join(WURZEL, ".github", "dependabot.yml"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn('package-ecosystem: "github-actions"', text)
+        self.assertIn('directory: "/"', text)
+
 
 if __name__ == "__main__":
     unittest.main()

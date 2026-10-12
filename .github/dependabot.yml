@@ -1,0 +1,16 @@
+# Dependabot prüft monatlich, ob es neue Versionen der GitHub Actions gibt,
+# und schlägt jede Aktualisierung als Pull Request vor. Die Festlegung auf
+# Commit-SHAs bleibt erhalten (neuer SHA + Versions-Kommentar); die Tests in
+# pruefen.yml laufen auf jedem Vorschlag. Übernommen wird nur nach Prüfung.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "Actions"

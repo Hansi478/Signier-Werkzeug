@@ -189,6 +189,9 @@ benutzt.
   aus dem Repository aus.
 - Alle Actions sind auf vollständige Commit-SHAs festgelegt, die Version
   steht im Kommentar.
+  Neue Versionen schlägt Dependabot monatlich als Pull Request vor
+  (`.github/dependabot.yml`); die SHA-Festlegung bleibt dabei erhalten, die
+  Tests laufen auf jedem Vorschlag, übernommen wird nur nach Prüfung.
 - Vor dem Bau wird geprüft:
   - Der Tag liegt auf einem Commit von `main`.
   - Tag und `VERSION` stimmen überein.
