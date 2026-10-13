@@ -66,6 +66,37 @@ Tag schon auf einem anderen Stand, bricht es ab, ohne etwas hochzuladen (eine ve
 Version wird nie verändert): dann `VERSION` erhöhen. Archive mit unzulässigen Pfaden,
 Verknüpfungen oder auffälliger Größe werden ganz abgelehnt.
 
+## QNAP (Dashboard auf dem NAS installieren oder neu bauen)
+
+Reiter „QNAP“: Das Werkzeug begleitet die SSH-Schritte für das Dashboard auf einer QNAP –
+jeder Schritt einzeln, mit Erklärung, dem genauen Befehl, typischen Fehlern und Abhilfe.
+Gestartet wird ein Schritt erst nach deiner Bestätigung, in einem eigenen Konsolenfenster
+(das in Windows eingebaute `ssh.exe`/`scp.exe`). Danach meldest du „Hat geklappt“ oder
+„Fehler“; erst dann ist der nächste Schritt frei. Passwort und Host-Schlüssel tippst bzw.
+bestätigst du nur im Konsolenfenster – das Werkzeug sieht und speichert kein Passwort und
+legt keine SSH-Schlüssel an. „Nur anleiten“ zeigt alle Befehle zum Lesen und Kopieren.
+
+Einmalig das QNAP-Profil ausfüllen: Host bzw. IP, Port, Benutzer, Programmordner (absoluter
+Pfad, ohne Leerzeichen), optional die Dashboard-Adresse, und das Signier-Profil, aus dessen
+Repository die Versionen kommen.
+
+Abläufe:
+
+- **Neue Version installieren:** Version (signierter Tag `v…`) wählen → das Werkzeug lädt
+  sie, prüft die Signatur und baut eine saubere ZIP → hochladen → Container anhalten →
+  alten Programmordner beiseitelegen (`….alt-Datum-Uhrzeit`, nicht löschen) → entpacken
+  (mit Prüfsummen-Kontrolle) → `build --no-cache` → `up -d` → Kontrolle → optional
+  aufräumen (alten Ordner, ZIP, alte Images).
+- **Nur neu bauen:** gleiche Version, neues Image (`build --no-cache`, `up -d`).
+- **Zur vorigen Version zurück:** den beiseitegelegten Ordner wieder an seinen Platz.
+- **Aufräumen:** beiseitegelegten Ordner endgültig löschen, ZIP und alte Images entfernen.
+
+Im Elternordner des Programmordners fasst das Werkzeug nur den Programmordner (umbenennen),
+die selbst angelegten `….alt-…`-Ordner und die selbst hochgeladene `<Programmordner>.zip` an –
+den Daten-Ordner daneben nie. Protokoll (Zeit, Schritt, Befehl, Rückmeldung; keine
+Passwörter): `%APPDATA%\Signier-Werkzeug\qnap-protokoll.txt`. Details: SICHERHEIT.md,
+Abschnitt 7.
+
 ## Andere Software
 
 „+ Profil für andere Software“: eigener Name und Schlüssel, Regel „Alle Dateien außer

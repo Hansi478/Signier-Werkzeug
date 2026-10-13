@@ -19,6 +19,7 @@ Speicher - nur für die laufende Sitzung im Arbeitsspeicher (siehe SICHERHEIT.md
 import base64
 import fnmatch
 import hashlib
+import io
 import json
 import os
 import re
@@ -40,8 +41,10 @@ import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+import qnap_begleiter as Q
+
 PROGRAMM = "Signier-Werkzeug"
-VERSION = "1.2.4"
+VERSION = "1.2.5"
 FORMAT = "sr-signatur-1"
 SIGNATUR_DATEI = "SIGNATUR.json"
 BINAER = (".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".otf")
@@ -1311,7 +1314,146 @@ def _token_meldung(d):
                        "und wird nicht dauerhaft gespeichert - nach einem Neustart erneut eingeben."}.get(art, "Token gespeichert.")
 
 
+# ---------------------------------------------------------------------------
+# QNAP-Begleiter (Reiter „QNAP“): Zustand in qnap.json, eigene Logik in
+# qnap_begleiter.py. Greift nicht auf Schlüssel oder profile.json zu (außer
+# lesend: Repository, öffentlicher Schlüssel und Token für den Download).
+# ---------------------------------------------------------------------------
+def _qnap_laden():
+    try:
+        daten = regulaer_lesen(os.path.join(daten_ordner(), "qnap.json"), MB)
+    except FileNotFoundError:
+        return {}
+    try:
+        d = json.loads(daten.decode("utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (ValueError, UnicodeDecodeError):
+        return {}
+
+
+def _qnap_speichern(d):
+    atomar_schreiben(daten_ordner(), "qnap.json", json.dumps(d, indent=1, ensure_ascii=False).encode("utf-8"), 0o600,
+                     lambda b: json.loads(b.decode("utf-8")))
+
+
+def _qnap():
+    return Q.Begleiter(_qnap_laden, _qnap_speichern, daten_ordner())
+
+
+def github_versionen(repo, token):
+    """Tags v<x.y.z> eines Repositorys, neueste zuerst."""
+    if not _REPO_RE.match(repo or ""):
+        raise ValueError("Ungültiges Repository.")
+    d = _gh(f"/repos/{repo}/tags?per_page=100", token)
+    namen = {str(t.get("name") or "") for t in d if isinstance(t, dict)} if isinstance(d, list) else set()
+    return sorted((n for n in namen if Q._TAG_RE.match(n)), key=lambda n: tuple(int(x) for x in n[1:].split(".")),
+                  reverse=True)[:30]
+
+
+def _zip_gueltig(daten):
+    with zipfile.ZipFile(io.BytesIO(daten)) as z:
+        if z.testzip() is not None:
+            raise ValueError("Die gebaute ZIP ist beschädigt.")
+
+
+def qnap_paket(pr, token, tag, name, ziel):
+    """Signierte Version (Tag) laden, prüfen und als saubere ZIP mit genau
+    einem Ordner `name` in `ziel` ablegen -> Angaben für die Anzeige.
+    ValueError, wenn Signatur, Dateien oder Version nicht passen."""
+    repo = pr.get("repo") or ""
+    if not _REPO_RE.match(repo) or not Q._TAG_RE.match(tag or "") or not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", name or ""):
+        raise ValueError("Ungültige Angaben für den Download.")
+    commit = _tag_commit(repo, token, tag)
+    if not re.fullmatch(r"[0-9a-f]{40}", commit or ""):
+        raise ValueError(f"Den Tag {tag} gibt es in {repo} nicht.")
+    os.makedirs(ziel, mode=0o700, exist_ok=True)
+    version = tag[1:]
+    with tempfile.TemporaryDirectory(prefix="qnap-", dir=ziel) as tmp:
+        ordner = os.path.join(tmp, "stand")
+        os.mkdir(ordner, 0o700)
+        with tempfile.TemporaryFile() as archiv:
+            _gh(f"/repos/{repo}/zipball/{commit}", token, timeout=300, limit=ZIP_GRENZEN["archiv_bytes"], ziel=archiv)
+            archiv.seek(0)
+            zip_entpacken(archiv, ordner)
+            archiv.seek(0)
+            with zipfile.ZipFile(archiv) as z:   # ausführbare Dateien (z. B. Startskript) behalten ihr Recht
+                ausfuehrbar = {i.filename.partition("/")[2] for i in z.infolist()
+                               if not i.filename.endswith("/") and (i.external_attr >> 16) & 0o111}
+        r = pruefen(ordner, pr.get("oeffentlich") or "", pr.get("regel", "alle"), pr.get("ausschluss"))
+        if not r.get("ok"):
+            liste = ", ".join(r.get("abweichend") or [])[:300]
+            raise ValueError(f"{tag}: {r.get('fehler') or 'Signatur nicht gültig.'}{' (' + liste + ')' if liste else ''} "
+                             "Nicht installieren.")
+        if str(r.get("version") or "") != version or ordner_version(ordner) != version:
+            raise ValueError(f"{tag}: Version in SIGNATUR.json bzw. VERSION passt nicht zum Tag - nicht installieren.")
+        signiert = set(json.loads(regulaer_lesen(os.path.join(ordner, SIGNATUR_DATEI), MAX_SIGNATUR_BYTES))["dateien"])
+        eintraege = []
+        _durchlaufen(ordner, "", lambda rel, n, ist_ordner: False, eintraege)
+        dateien = sorted(rel for rel, _ in eintraege)
+        zeit = time.localtime()[:6]
+        puffer = io.BytesIO()
+        with zipfile.ZipFile(puffer, "w", zipfile.ZIP_DEFLATED) as zo:
+            ordner_namen = sorted({"/".join(r_.split("/")[:i]) for r_ in dateien for i in range(1, r_.count("/") + 1)})
+            for rel in [""] + ordner_namen:
+                info = zipfile.ZipInfo(name + "/" + (rel + "/" if rel else ""), date_time=zeit)
+                info.external_attr = (0o40755 << 16) | 0x10
+                zo.writestr(info, b"")
+            for rel in dateien:
+                info = zipfile.ZipInfo(name + "/" + rel, date_time=zeit)
+                info.external_attr = (0o100755 if rel in ausfuehrbar else 0o100644) << 16
+                info.compress_type = zipfile.ZIP_DEFLATED
+                zo.writestr(info, regulaer_lesen(os.path.join(ordner, *rel.split("/"))))
+        daten = puffer.getvalue()
+    atomar_schreiben(ziel, name + ".zip", daten, 0o600, _zip_gueltig)
+    unsigniert = [rel for rel in dateien if rel not in signiert and rel != SIGNATUR_DATEI]
+    return {"tag": tag, "version": version, "commit": commit, "zip": os.path.join(ziel, name + ".zip"),
+            "sha256": hashlib.sha256(daten).hexdigest(), "dateien": len(dateien), "signiert": len(signiert),
+            "unsigniert": unsigniert[:200], "unsigniert_anzahl": len(unsigniert)}
+
+
+def qnap_aktion(name, p):
+    with _lock:
+        d = profile_laden()
+        quellen = {x["id"]: x for x in d.get("profile") or [] if x.get("repo") and x.get("oeffentlich") and x.get("id")}
+        token = geheim_lesen(d.get("github_token"))
+    b = _qnap()
+    liste = [{"id": k, "name": v.get("name"), "repo": v.get("repo")} for k, v in quellen.items()]
+
+    def quelle(pr):
+        q = quellen.get((pr or {}).get("quelle"))
+        if not q:
+            raise ValueError("Im QNAP-Profil ist kein gültiges Signier-Profil (mit Repository und Schlüssel) gewählt.")
+        return q
+    if name == "qnap_zustand":
+        antwort = b.ansicht(p.get("ablauf"))
+    elif name == "qnap_profil_speichern":
+        antwort = b.profil_speichern(p, quellen)
+    elif name == "qnap_beginnen":
+        antwort = b.beginnen(str(p.get("ablauf") or ""))
+    elif name == "qnap_abbrechen":
+        antwort = b.abbrechen()
+    elif name == "qnap_alt_vergessen":
+        antwort = b.alt_vergessen()
+    elif name == "qnap_vorbereiten":
+        return b.vorbereiten(str(p.get("schritt") or ""))
+    elif name == "qnap_ausfuehren":
+        antwort = b.ausfuehren(str(p.get("schritt") or ""), p.get("marke"), p,
+                               lambda pr, tag, n: qnap_paket(quelle(pr), token, tag, n, os.path.join(daten_ordner(), "qnap")))
+    elif name == "qnap_rueckmelden":
+        antwort = b.rueckmelden(str(p.get("schritt") or ""), str(p.get("ergebnis") or ""), p)
+    elif name == "qnap_versionen":
+        return {"versionen": github_versionen(quelle(b.ansicht()["profil"])["repo"], token)}
+    elif name == "qnap_http":
+        pr = b.ansicht()["profil"] or {}
+        return Q.http_pruefen(pr.get("adresse"))
+    else:
+        raise ValueError("Unbekannte Aktion.")
+    return {**antwort, "quellen": liste}
+
+
 def aktion(name, p):
+    if name.startswith("qnap_"):
+        return qnap_aktion(name, p)
     with _lock:
         d = profile_laden()
         if name == "zustand":
@@ -1396,7 +1538,7 @@ def aktion(name, p):
         if name == "datei_waehlen":
             return {"pfad": datei_waehlen()}
         if name == "ordner_oeffnen":
-            ordner_oeffnen(daten_ordner() if p.get("was") == "daten" else str(p.get("pfad") or ""))
+            ordner_oeffnen(daten_ordner() if p.get("was") in ("daten", "qnap") else str(p.get("pfad") or ""))
             return {}
         if name == "werkzeug_veroeffentlichen":
             pr = next((x for x in d.get("profile") or [] if x.get("oeffentlich") == WERKZEUG_SCHLUESSEL), None)
@@ -1620,6 +1762,18 @@ def _sicherheit_selbsttest(tmp):
             fehler.append("atomar: temporäre Datei liegen geblieben")
     except (OSError, ValueError) as e:
         fehler.append(f"atomar: {e.__class__.__name__}: {e}")
+    for wert in ("/share/../x", "/share/x;id", "/share/x y", "/share/Daten", "relativ/x"):   # QNAP-Begleiter
+        try:
+            Q.programmordner_pruefen(wert)
+            fehler.append(f"qnap:{wert!r} angenommen")
+        except ValueError:
+            pass
+    for arg in ("a%PATH%", "a!b", 'a"b'):
+        try:
+            Q.befehlszeile([arg])
+            fehler.append(f"qnap: Befehlszeile mit {arg!r} angenommen")
+        except ValueError:
+            pass
     return fehler
 
 
@@ -1675,7 +1829,8 @@ Version __VERSION__ <button class="zweit" id="beenden">Beenden</button></div></h
 <div id="update-leiste" class="versteckt" style="padding:10px 20px;background:#1e293b;border-bottom:1px solid var(--rand)"></div>
 <main>
 <nav><button data-reiter="signieren" class="aktiv">Signieren</button><button data-reiter="pruefen">Prüfen</button>
-<button data-reiter="profile">Profile &amp; Schlüssel</button><button data-reiter="github">GitHub</button></nav>
+<button data-reiter="profile">Profile &amp; Schlüssel</button><button data-reiter="github">GitHub</button>
+<button data-reiter="qnap">QNAP</button></nav>
 
 <section id="r-signieren">
  <div class="karte"><h2>Version signieren</h2>
@@ -1747,6 +1902,34 @@ Version __VERSION__ <button class="zweit" id="beenden">Beenden</button></div></h
   <button class="zweit" id="w-baustatus">Bau-Status prüfen</button>
   <button id="w-veroeff">Neuen Entwurf signieren und veröffentlichen</button></div>
   <div class="status" id="w-status"></div></div>
+</section>
+
+<section id="r-qnap" class="versteckt">
+ <div class="karte"><h2>QNAP-Profil</h2>
+  <div class="hinweis">Begleitet die SSH-Schritte für das Speedrace-Dashboard auf einer QNAP: Jeder Schritt wird einzeln erklärt und
+  erst nach deiner Bestätigung in einem eigenen Konsolenfenster gestartet (das in Windows eingebaute ssh). Passwort und Host-Schlüssel
+  bestätigst du nur dort – das Werkzeug sieht und speichert kein Passwort und legt keine SSH-Schlüssel an.</div>
+  <div class="zeile"><div><label for="q-host">Host bzw. IP</label><input id="q-host" placeholder="192.0.2.10" autocomplete="off"></div>
+   <div style="flex:0 0 110px"><label for="q-port">Port</label><input id="q-port" value="22" autocomplete="off"></div>
+   <div><label for="q-benutzer">Benutzer</label><input id="q-benutzer" placeholder="admin-benutzer" autocomplete="off"></div></div>
+  <div class="zeile"><div><label for="q-ordner">Programmordner auf der QNAP (absolut)</label><input id="q-ordner" placeholder="/share/BEISPIEL/programmordner" autocomplete="off"></div>
+   <div><label for="q-adresse">Dashboard-Adresse (optional, für die Kontrolle)</label><input id="q-adresse" placeholder="http://192.0.2.10:8090" autocomplete="off"></div></div>
+  <div class="zeile"><div><label for="q-quelle">Versionen von (Signier-Profil mit GitHub-Repository)</label><select id="q-quelle"></select></div>
+   <div><label for="q-compose">Docker-Variante</label><select id="q-compose"><option value="plugin">docker compose</option><option value="standalone">docker-compose</option></select></div>
+   <div><label for="q-bin">Ordner der Docker-Programme (nur falls nötig)</label><input id="q-bin" placeholder="leer lassen" autocomplete="off"></div></div>
+  <div class="zeile" style="margin-top:12px"><button id="q-speichern">Profil speichern</button></div>
+  <div class="status" id="q-pstatus"></div></div>
+ <div class="karte"><h2>Ablauf</h2>
+  <div class="zeile"><div><label for="q-ablauf">Was soll passieren?</label><select id="q-ablauf"></select></div>
+   <button id="q-beginnen">Ablauf beginnen</button><button class="zweit" id="q-abbrechen">Abbrechen</button></div>
+  <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="q-nur" style="width:auto">
+   Nur anleiten (nichts ausführen – Befehle nur lesen und kopieren)</label>
+  <div class="zeile" style="margin-top:10px"><button class="zweit" id="q-http">Dashboard-Adresse prüfen</button>
+   <button class="zweit" id="q-protokoll">Ordner mit Protokoll öffnen</button>
+   <button class="zweit versteckt" id="q-vergessen">Gemerkten alten Ordner vergessen</button></div>
+  <div class="hinweis" id="q-info" style="margin-top:8px"></div>
+  <div class="status" id="q-status"></div></div>
+ <div id="q-schritte"></div>
 </section>
 </main>
 <div id="kw-dialog" class="versteckt" style="position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center">
@@ -1943,6 +2126,134 @@ $("w-veroeff").onclick = async e => {
   mit("w-status", e.target, "Lade Entwurf, signiere und veröffentliche …", async () => {
     const d = await api("werkzeug_veroeffentlichen", {kennwort: kw}); $("w-veroeff").classList.remove("hervor"); status("w-status", "ok", "✅ " + esc(d.meldung)); });
 };
+// ---- QNAP-Begleiter ----------------------------------------------------
+let QZ = null;
+const Q_STATUS = {offen: "offen", laeuft: "läuft – Ergebnis melden", erledigt: "erledigt", fehler: "Fehler", uebersprungen: "übersprungen"};
+function qSetzen(d) { QZ = d; qZeichnen(); }
+function qProfilZeigen() {
+  const p = QZ.profil || {};
+  $("q-host").value = p.host || ""; $("q-port").value = p.port || 22; $("q-benutzer").value = p.benutzer || "";
+  $("q-ordner").value = p.programmordner || ""; $("q-adresse").value = p.adresse || ""; $("q-bin").value = p.bin_ordner || "";
+  $("q-compose").value = p.compose || "plugin";
+  $("q-quelle").innerHTML = '<option value="">– bitte wählen –</option>' + (QZ.quellen || []).map(x =>
+    `<option value="${esc(x.id)}">${esc(x.name)} (${esc(x.repo)})</option>`).join("");
+  $("q-quelle").value = p.quelle || "";
+}
+function qZeichnen() {
+  if (!QZ) return;
+  const laeuft = !!QZ.lauf, nur = $("q-nur").checked;
+  if (!$("q-ablauf").options.length) $("q-ablauf").innerHTML = Object.entries(QZ.ablaeufe).map(([k, t]) => `<option value="${esc(k)}">${esc(t)}</option>`).join("");
+  $("q-ablauf").value = QZ.ablauf; $("q-ablauf").disabled = laeuft;
+  ["q-host", "q-port", "q-benutzer", "q-ordner", "q-adresse", "q-bin", "q-compose", "q-quelle", "q-speichern"].forEach(id => $(id).disabled = laeuft);
+  $("q-beginnen").disabled = laeuft || !QZ.profil; $("q-abbrechen").disabled = !laeuft;
+  $("q-vergessen").classList.toggle("versteckt", !QZ.alt || laeuft);
+  $("q-info").innerHTML = (QZ.alt ? `Beiseitegelegter alter Ordner: <span class="mono">${esc(QZ.alt)}</span> (Rückweg möglich). ` : "")
+    + `Protokoll: <span class="mono">${esc(QZ.protokoll)}</span>`;
+  const idx = laeuft ? QZ.lauf.index : -1;
+  $("q-schritte").innerHTML = QZ.schritte.map(s => {
+    const aktiv = laeuft && s.nr === idx && !nur, st = s.status;
+    const marke = st === "erledigt" ? "gut" : (st === "fehler" ? "schlecht" : "");
+    let h = `<div class="karte" id="qs-${s.nr}" style="${laeuft && s.nr === idx ? "border-color:var(--akzent)" : ""}">
+      <h2>${s.nr + 1}. ${esc(s.titel)}${s.optional ? " <span class=\"marke\">optional</span>" : ""} <span class="marke ${marke}">${esc(Q_STATUS[st] || st)}</span></h2>
+      <ul>${s.erklaerung.map(t => `<li>${esc(t)}</li>`).join("")}</ul>
+      <div class="hinweis" style="margin-top:6px"><b>Was du sehen solltest:</b> ${esc(s.erwartet)}</div>`;
+    if (s.befehl) h += `<div class="zeile" style="margin-top:8px"><div class="mono karte" style="margin:0;padding:8px">${esc(s.befehl)}</div>
+      <button class="zweit" data-qkopie="${s.nr}">Kopieren</button></div>`;
+    if (s.id === "version" && QZ.lauf && QZ.lauf.paket) {
+      const k = QZ.lauf.paket;
+      h += `<div class="status ok">✅ ${esc(k.tag)} – Signatur gültig (${k.signiert} signierte Dateien), Commit <span class="mono">${esc(k.commit.slice(0, 7))}</span>,
+        ZIP-Prüfsumme <span class="mono">${esc(k.sha256)}</span>.<details style="margin-top:6px"><summary>${k.unsigniert_anzahl} Dateien nicht von der Signatur erfasst
+        (aus demselben Tag-Commit)</summary><div class="mono hinweis">${k.unsigniert.map(esc).join("<br>")}</div></details></div>`;
+    }
+    if (s.fehler.length) h += `<details ${st === "fehler" ? "open" : ""} style="margin-top:8px"><summary class="hinweis">Typische Fehler und Abhilfe</summary><ul>`
+      + s.fehler.map(f => `<li><span class="mono">${esc(f[0])}</span> – ${esc(f[1])}</li>`).join("") + "</ul></details>";
+    if (aktiv) {
+      h += `<div style="margin-top:10px;border-top:1px solid var(--rand);padding-top:10px">`;
+      if (s.art === "lokal") h += `<div class="zeile"><div><label for="q-tag">Version (signierter Tag)</label><select id="q-tag"><option value="">– erst „Versionen laden“ –</option></select></div>
+        <button class="zweit" id="q-tags">Versionen laden</button></div>`;
+      if (s.bestaetigung === "veranstaltung") h += `<div class="status fehler" style="display:block">⚠️ Nicht am Tag vor oder am Veranstaltungstag!
+        Ab diesem Schritt ist das Dashboard einige Minuten nicht erreichbar.<label style="display:flex;gap:8px;align-items:center">
+        <input type="checkbox" id="q-veranst" style="width:auto"> Heute ist weder der Tag vor noch der Tag einer Veranstaltung.</label></div>`;
+      if (s.bestaetigung === "name" || s.bestaetigung === "alt") h += `<label for="q-name">Zur Sicherheit den Namen abtippen: <span class="mono">${esc(s.bestaetigung === "name" ? QZ.name : QZ.alt)}</span></label>
+        <input id="q-name" autocomplete="off">`;
+      if (s.art !== "anleitung" && st !== "laeuft") h += `<div class="zeile" style="margin-top:10px"><button data-qlos="${s.nr}">${s.art === "lokal" ? "Laden und prüfen" : "Im SSH-Fenster ausführen"}</button>
+        ${s.optional ? `<button class="zweit" data-qmeld="uebersprungen">Überspringen</button>` : ""}</div>`;
+      if (s.art === "anleitung" || st === "laeuft") {
+        if (s.rueckfrage === "root") h += `<label for="q-root">Ist der Benutzer root (Zahl nach „Verbindung-OK“ ist 0)?</label><select id="q-root">
+          <option value="">– bitte wählen –</option><option value="ja">ja (0) – ohne sudo</option><option value="nein">nein – mit sudo</option></select>`;
+        if (s.rueckfrage === "compose") h += `<label for="q-variante">Welche Variante hat eine Version gemeldet?</label><select id="q-variante">
+          <option value="">– bitte wählen –</option><option value="plugin">docker compose</option><option value="standalone">docker-compose</option></select>`;
+        h += `<div class="zeile" style="margin-top:10px"><button data-qmeld="geklappt">Hat geklappt</button>
+          ${s.art !== "anleitung" ? `<button class="zweit" data-qmeld="fehler">Fehler – Hilfe anzeigen</button>` : ""}
+          ${s.art !== "anleitung" ? `<button class="zweit" data-qlos="${s.nr}">Noch einmal ausführen</button>` : ""}
+          ${s.optional ? `<button class="zweit" data-qmeld="uebersprungen">Überspringen</button>` : ""}</div>`;
+      }
+      h += `<div class="status" id="q-sstatus"></div></div>`;
+    }
+    return h + "</div>";
+  }).join("");
+  document.querySelectorAll("[data-qkopie]").forEach(b => b.onclick = () => {
+    const s = QZ.schritte[+b.dataset.qkopie];
+    navigator.clipboard.writeText(s.befehl).then(() => { b.textContent = "Kopiert ✓"; setTimeout(() => b.textContent = "Kopieren", 1500); });
+  });
+  if ($("q-tags")) $("q-tags").onclick = e => mit("q-sstatus", e.target, "Frage GitHub …", async () => {
+    const d = await api("qnap_versionen");
+    $("q-tag").innerHTML = d.versionen.length ? d.versionen.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join("") : '<option value="">– keine Tags gefunden –</option>';
+    status("q-sstatus", "ok", "✅ " + d.versionen.length + " Versionen. Die neueste ist vorausgewählt."); });
+  document.querySelectorAll("[data-qlos]").forEach(b => b.onclick = () => qAusfuehren(QZ.schritte[+b.dataset.qlos], b));
+  document.querySelectorAll("[data-qmeld]").forEach(b => b.onclick = () => qMelden(QZ.schritte[idx], b.dataset.qmeld, b));
+}
+async function qAusfuehren(s, knopf) {
+  const extra = {schritt: s.id, bestaetigt: true};
+  if ($("q-veranst")) extra.veranstaltung = $("q-veranst").checked;
+  if ($("q-name")) extra.name = $("q-name").value;
+  if ($("q-tag")) extra.tag = $("q-tag").value;
+  mit("q-sstatus", knopf, s.art === "lokal" ? "Lade und prüfe … (kann eine Minute dauern)" : "Bereite vor …", async () => {
+    if (s.art === "lokal" && !extra.tag) throw new Error("Bitte erst „Versionen laden“ und eine Version wählen.");
+    const v = await api("qnap_vorbereiten", {schritt: s.id});
+    const text = s.art === "lokal" ? `${extra.tag} von GitHub laden, Signatur prüfen und ZIP bauen?`
+      : `Dieser Befehl wird jetzt in einem neuen Konsolenfenster gestartet:\n\n${v.zeile}\n\nPasswort bzw. Host-Schlüssel bestätigst du dort selbst. Starten?`;
+    if (!confirm(text)) return status("q-sstatus", "laeuft", "Nicht gestartet.");
+    const d = await api("qnap_ausfuehren", {...extra, marke: v.marke});
+    qSetzen(d);
+    status("q-sstatus", "ok", s.art === "lokal" ? "✅ Geprüft. Bitte das Ergebnis oben ansehen und melden."
+      : "✅ Fenster geöffnet. Wenn es fertig ist: Ergebnis hier melden (das Fenster kannst du danach schließen).");
+  });
+}
+function qMelden(s, ergebnis, knopf) {
+  const extra = {schritt: s.id, ergebnis};
+  if ($("q-root")) extra.root = $("q-root").value;
+  if ($("q-variante")) extra.compose = $("q-variante").value;
+  mit("q-sstatus", knopf, "Speichere …", async () => {
+    const d = await api("qnap_rueckmelden", extra); qSetzen(d);
+    if (d.fertig) return status("q-status", "ok", "✅ Ablauf abgeschlossen. Alles steht im Protokoll.");
+    if (ergebnis === "fehler") return status("q-sstatus", "fehler", "Fehler gemeldet – unter „Typische Fehler und Abhilfe“ nachsehen. Danach den Schritt erneut ausführen oder den Ablauf abbrechen.");
+    const n = $("qs-" + d.lauf.index); if (n) n.scrollIntoView({behavior: "smooth", block: "center"});
+  });
+}
+async function qLaden() { try { const a = $("q-ablauf").value; qSetzen(await api("qnap_zustand", a ? {ablauf: a} : {})); qProfilZeigen(); } catch (e) { status("q-status", "fehler", "❌ " + esc(e.message)); } }
+$("q-ablauf").onchange = qLaden;
+$("q-nur").onchange = qZeichnen;
+$("q-speichern").onclick = e => mit("q-pstatus", e.target, "Speichere …", async () => {
+  qSetzen(await api("qnap_profil_speichern", {host: $("q-host").value, port: $("q-port").value, benutzer: $("q-benutzer").value,
+    programmordner: $("q-ordner").value, adresse: $("q-adresse").value, quelle: $("q-quelle").value, compose: $("q-compose").value,
+    bin_ordner: $("q-bin").value}));
+  qProfilZeigen(); status("q-pstatus", "ok", "✅ Gespeichert."); });
+$("q-beginnen").onclick = e => mit("q-status", e.target, "Beginne …", async () => {
+  qSetzen(await api("qnap_beginnen", {ablauf: $("q-ablauf").value}));
+  status("q-status", "ok", "✅ Ablauf begonnen – Schritt 1 ist freigegeben."); });
+$("q-abbrechen").onclick = e => {
+  if (!confirm("Ablauf abbrechen? Bereits ausgeführte Schritte werden nicht rückgängig gemacht (ein beiseitegelegter Ordner bleibt gemerkt).")) return;
+  mit("q-status", e.target, "Breche ab …", async () => { qSetzen(await api("qnap_abbrechen")); status("q-status", "ok", "Abgebrochen."); });
+};
+$("q-vergessen").onclick = e => {
+  if (!confirm(`Den gemerkten Ordner „${QZ.alt}“ vergessen? Nur, wenn es ihn auf der QNAP sicher nicht (mehr) gibt – sonst geht der Rückweg verloren.`)) return;
+  mit("q-status", e.target, "…", async () => { qSetzen(await api("qnap_alt_vergessen")); status("q-status", "ok", "Vergessen."); });
+};
+$("q-http").onclick = e => mit("q-status", e.target, "Rufe die Dashboard-Adresse auf …", async () => {
+  const d = await api("qnap_http"); status("q-status", d.ok ? "ok" : "fehler", (d.ok ? "✅ " : "❌ ") + esc(d.text)); });
+$("q-protokoll").onclick = () => api("ordner_oeffnen", {was: "qnap"}).catch(e => alert(e.message));
+document.querySelector('[data-reiter="qnap"]').addEventListener("click", qLaden);
 api("update_suchen").then(updateZeigen).catch(() => {});
 api("zustand").then(d => { Z = d; zeichnen(); if (!Z.profile.length) document.querySelector('[data-reiter="profile"]').click(); })
   .catch(e => alert(e.message));

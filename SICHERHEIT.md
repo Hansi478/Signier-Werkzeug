@@ -294,7 +294,50 @@ PyInstaller-Builds sind nicht garantiert bit-genau reproduzierbar
 (`PYTHONHASHSEED` ist fest gesetzt). Die Nachvollziehbarkeit beruht deshalb
 auf Attestation, Prüfsumme und Signatur.
 
-## 7. Bekannte Grenzen
+## 7. QNAP-Begleiter (Reiter „QNAP“)
+
+Der Bereich leitet SSH-Schritte auf einer QNAP an. Er ist bewusst eng gehalten:
+
+- **Keine Kette, kein Freitext.** Es gibt nur feste Abläufe aus festen Schritten
+  (`qnap_begleiter.py`, `ABLAEUFE`/`SCHRITTE`). Die Reihenfolge prüft der Server:
+  `vorbereiten` legt den Befehl fest und gibt eine Einmal-Marke aus. `ausfuehren` startet
+  nur mit dieser Marke, ausdrücklicher Bestätigung und nur für den aktuellen Schritt.
+  Der nächste Schritt wird erst nach der Rückmeldung des Benutzers frei. Es gibt keinen
+  Aufruf, der mehrere Schritte ausführt, und kein Feld für eigene Befehle.
+- **SSH nur über Windows.** Gestartet wird `%SystemRoot%\System32\cmd.exe /d /v:off /k`
+  mit `%SystemRoot%\System32\OpenSSH\ssh.exe` bzw. `scp.exe` (absolute Pfade, kein PATH),
+  über `CreateProcess` ohne Shell dieses Prozesses, je Schritt ein neues Fenster. Kein
+  SSH-Paket im Werkzeug, keine Schlüssel, kein Passwort im Werkzeug, kein `-o`.
+- **Eingaben.** Host `[A-Za-z0-9.:-]`, Benutzer `[A-Za-z0-9._-]` (beide nicht mit `-`
+  beginnend, gegen Optionen wie `-oProxyCommand`), Port 1–65535, Pfade absolut aus
+  `[A-Za-z0-9._/-]` ohne `..`, `.`, `//`, Teile mit `-` am Anfang und ohne Leerzeichen
+  (scp übergibt den Zielpfad bei älteren Windows-Versionen an die Shell der QNAP). In
+  Befehlen stehen Pfade immer in einfachen Anführungszeichen. Die fertige Befehlszeile wird
+  zusätzlich auf Zeichen geprüft, die cmd.exe auch in Anführungszeichen auswertet (`%`, `!`,
+  `"`, Steuerzeichen).
+- **Was angefasst wird.** Im Elternordner des Programmordners nur der Programmordner
+  (umbenennen, nie löschen), selbst angelegte `<Name>.alt-JJJJMMTT-hhmm`/`.kaputt-…` und
+  die eigene `<Name>.zip`. `rm -r` gibt es nur für einen `.alt-…`-Ordner, den das Werkzeug
+  selbst angelegt und gemerkt hat. Kein `-f`, keine Platzhalterzeichen, keine Variablen.
+  Umbenennen und Löschen verlangen den abgetippten Namen. Der Programmordner darf nicht
+  `Daten` oder `container-station-data` heißen.
+- **Herkunft der Version.** Nur signierte Tags `v<x.y.z>`. Das Werkzeug lädt den Tag-Commit
+  über die GitHub-API (mit den ZIP-Prüfungen aus Abschnitt 4), prüft die Signatur mit dem
+  öffentlichen Schlüssel des gewählten Profils (Bestandsregel aus Abschnitt 2) und verlangt,
+  dass Signatur und `VERSION` zum Tag passen. Daraus baut es eine neue ZIP mit genau einem
+  Ordner. Auf der QNAP prüft `sha256sum -c` die Prüfsumme vor dem Entpacken.
+- **Grenze:** Die Signatur des Dashboards deckt nur die Dateien ab, die ein Update übernimmt.
+  `Dockerfile`, `docker-compose.yml` und `tools/` (Startskript, Updatehelfer) kommen aus
+  demselben Tag-Commit, sind aber nicht signiert. Das Werkzeug zeigt sie in Schritt „Version
+  laden und prüfen“ an.
+- **Prüfen der Dashboard-Adresse:** nur GET, ohne Token, ohne Proxy, Weiterleitungen werden
+  nicht verfolgt. Angezeigt wird nur der Statuscode.
+- **Daten:** Profil und Ablauf in `qnap.json`, Protokoll in `qnap-protokoll.txt` (Zeit,
+  Ablauf, Schritt, Ereignis, Befehl; rotiert ab 512 KB). Beides liegt im Datenordner. Der
+  Bereich liest aus `profile.json` nur Repository, Regel und öffentlichen Schlüssel sowie
+  das Token für den Download. Auf private Schlüssel greift er nicht zu.
+
+## 8. Bekannte Grenzen
 
 - Die exe hat keine Authenticode-Signatur. Windows SmartScreen warnt deshalb
   beim ersten Start nach einem Browser-Download.
