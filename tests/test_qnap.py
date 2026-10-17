@@ -88,6 +88,9 @@ class EingabeTests(unittest.TestCase):
                                    "compose", "root"})
 
 
+Q_ERGEBNIS = "rc=$?; if [ $rc -le 2 ]; then echo Ergebnis=$rc; else echo Ergebnis=$rc - keine Pruefung, Fehler melden; fi;"
+
+
 class BefehlTests(unittest.TestCase):
     def befehl(self, sid, pr, lauf=None, z=None):
         return Q.SCHRITTE[sid]["befehl"](pr, lauf or {}, z or {}, False)
@@ -130,19 +133,20 @@ class BefehlTests(unittest.TestCase):
                             "elif [ -d 'programmordner' ]; then sudo mv -- 'programmordner' 'programmordner.alt-20260101-1200' "
                             "&& ls -la; else echo 'ABBRUCH: programmordner fehlt - nichts veraendert'; fi")
         self.assertRaises(ValueError, self.befehl, "entpacken", pr)   # ohne geprüfte ZIP
-        b = self.befehl("entpacken", pr, {"paket": {"sha256": "a" * 64}})
-        self.assertIn("echo '" + "a" * 64 + "  programmordner.zip' | sha256sum -c - && ", b)
-        self.assertIn("unzip -q 'programmordner.zip'", b)
+        self.assertRaises(ValueError, self.befehl, "entpacken", pr, {"paket": {"sha256": "a" * 64, "zipname": "programmordner.zip"}})
+        b = self.befehl("entpacken", pr, {"paket": {"sha256": "a" * 64, "zipname": "programmordner.signier-20260101-1200.zip"}})
+        self.assertIn("echo '" + "a" * 64 + "  programmordner.signier-20260101-1200.zip' | sha256sum -c - && ", b)
+        self.assertIn("unzip -q 'programmordner.signier-20260101-1200.zip'", b)
         self.assertNotIn("sudo unzip", b)
 
     def test_aufraeumen_nur_erlaubte_ziele(self):
         """Kein Befehl nennt etwas anderes als Programmordner, …alt-, ….kaputt- oder die eigene ZIP;
         nie Platzhalterzeichen, nie rm -f/-rf, rm -r nur auf …alt-Ordner."""
         pr = profil(root_wert=False)
-        z = {"alt": "programmordner.alt-20260101-1200"}
-        lauf = {"paket": {"sha256": "b" * 64}, "geplant_alt": "programmordner.alt-20260101-1300",
+        z = {"alt": "programmordner.alt-20260101-1200", "zips": ["programmordner.signier-20260101-1200.zip"]}
+        lauf = {"paket": {"sha256": "b" * 64, "zipname": "programmordner.signier-20260101-1200.zip"}, "geplant_alt": "programmordner.alt-20260101-1300",
                 "geplant_kaputt": "programmordner.kaputt-20260101-1300"}
-        erlaubt = {"'/share/BEISPIEL'", "'/share/BEISPIEL/programmordner'", "'programmordner'", "'programmordner.zip'",
+        erlaubt = {"'/share/BEISPIEL'", "'/share/BEISPIEL/programmordner'", "'programmordner'", "'programmordner.signier-20260101-1200.zip'",
                    "'programmordner.alt-20260101-1200'", "'programmordner.alt-20260101-1300'",
                    "'programmordner.kaputt-20260101-1300'", "'--bau-pruefen'", "'/share/BEISPIEL/programmordner/app.py'"}
         import re
@@ -152,11 +156,11 @@ class BefehlTests(unittest.TestCase):
             with self.subTest(schritt=sid):
                 b = s["befehl"](pr, lauf, z, False)
                 for teil in re.findall(r"'[^']*'", b):
-                    if teil.startswith("'ABBRUCH") or teil == "'" + "b" * 64 + "  programmordner.zip'":
+                    if teil.startswith("'ABBRUCH") or teil == "'" + "b" * 64 + "  programmordner.signier-20260101-1200.zip'":
                         continue
                     self.assertIn(teil, erlaubt, b)
                 for verboten in ("*", "?", "rm -f", "rm -rf", "Daten", "container-station-data", "$", "`", '"'):
-                    self.assertNotIn(verboten, b.replace("'" + "b" * 64, "").replace("echo Ergebnis=$?;", ""))
+                    self.assertNotIn(verboten, b.replace("'" + "b" * 64, "").replace(Q_ERGEBNIS, ""))
                 if "rm -r" in b:
                     self.assertIn("rm -r -- 'programmordner.alt-20260101-1200'", b)
 
@@ -323,7 +327,7 @@ class ReihenfolgeTests(Ablauf):
         oeffentlich = [n for n in dir(self.b) if not n.startswith("_")]
         self.assertEqual(sorted(oeffentlich), sorted(["abbrechen", "alt_vergessen", "ansicht", "ausfuehren", "beginnen", "jetzt",
                                                "lock", "ordner", "profil_speichern", "prog", "protokollieren",
-                                               "rueckmelden", "starter", "vorbereiten"]))
+                                               "rueckmelden", "sperre_aufheben", "starter", "vorbereiten"]))
 
 
 class InstallierenTests(Ablauf):
@@ -370,7 +374,7 @@ class InstallierenTests(Ablauf):
         # scp lädt die geprüfte ZIP in den Elternordner, unter festem Namen
         scp = [z for z in self.gestartet if "scp.exe" in z]
         self.assertEqual(len(scp), 1)
-        self.assertIn('"admin-benutzer@192.0.2.10:/share/BEISPIEL/programmordner.zip"', scp[0])
+        self.assertRegex(scp[0], r'"admin-benutzer@192\.0\.2\.10:/share/BEISPIEL/programmordner\.signier-\d{8}-\d{4}\.zip"')
         self.assertEqual(len(self.gestartet), 14)   # jeder SSH-/scp-Schritt einzeln
 
     def test_version_nur_tag(self):
@@ -418,6 +422,10 @@ class InstallierenTests(Ablauf):
         self.b.ausfuehren("zurueckholen", v["marke"], {"bestaetigt": True, "name": alt})
         self.b.rueckmelden("zurueckholen", "geklappt", {})
         self.assertEqual(self.b.ansicht()["alt"], "")
+        self.assertRaises(ValueError, self.b.vorbereiten, "starten")   # erst das alte Image neu bauen
+        self.schritt("bau_vorpruefung", treffer="mehr")
+        self.schritt("bau_pruefen_run", bauergebnis="0")
+        self.schritt("bauen")
         self.b.vorbereiten("starten")
 
     def test_zurueck_ohne_alt_ordner(self):
@@ -475,15 +483,15 @@ class BauPruefungTests(Ablauf):
                          "grep -c -- '--bau-pruefen' '/share/BEISPIEL/programmordner/app.py'")
         self.assertEqual(Q.SCHRITTE["bau_pruefen"]["befehl"](pr, {}, {}, False),
                          "cd '/share/BEISPIEL/programmordner' && { sudo docker compose exec dashboard python app.py "
-                         "--bau-pruefen; echo Ergebnis=$?; }")
+                         "--bau-pruefen; " + Q_ERGEBNIS + " }")
         pr = profil(root_wert=True, compose="standalone")
         self.assertEqual(Q.SCHRITTE["bau_pruefen_run"]["befehl"](pr, {}, {}, False),
                          "cd '/share/BEISPIEL/programmordner' && { docker-compose run --rm --no-deps --entrypoint python "
-                         "dashboard app.py --bau-pruefen; echo Ergebnis=$?; }")
+                         "dashboard app.py --bau-pruefen; " + Q_ERGEBNIS + " }")
         # durch cmd.exe (Windows-Befehlszeile) unverändert
         prog, zeile = Q.befehlszeile(Q.ssh_argv(pr, Q.SCHRITTE["bau_pruefen"]["befehl"](pr, {}, {}, False), PROG), PROG)
         self.assertIn('"cd \'/share/BEISPIEL/programmordner\' && { docker-compose exec dashboard python app.py '
-                      '--bau-pruefen; echo Ergebnis=$?; }""', zeile)
+                      '--bau-pruefen; ' + Q_ERGEBNIS + ' }""', zeile)
 
     def test_reihenfolge_vor_dem_neubau(self):
         for ablauf, pruef in (("neubau", "bau_pruefen"), ("installieren", "bau_pruefen_run")):

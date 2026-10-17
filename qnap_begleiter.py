@@ -156,7 +156,19 @@ def orte(profil):
     """Programmordner, Elternordner, Name, Ziel der ZIP auf der QNAP."""
     p = programmordner_pruefen(profil.get("programmordner"))
     e, name = posixpath.split(p)
-    return {"p": p, "e": e, "name": name, "zipname": name + ".zip", "zip": e + "/" + name + ".zip"}
+    return {"p": p, "e": e, "name": name}
+
+
+def zip_name(name, jetzt=None):
+    """Eigener, eindeutiger Name der hochgeladenen ZIP - nie der einer
+    Datei, die der Benutzer selbst angelegt haben könnte (z. B. <Name>.zip)."""
+    return name + ".signier-" + time.strftime("%Y%m%d-%H%M", time.localtime(jetzt)) + ".zip"
+
+
+def _zip_pruefen(o, zipname):
+    if not re.fullmatch(re.escape(o["name"]) + r"\.signier-\d{8}-\d{4}\.zip", str(zipname or "")):
+        raise ValueError("Unbekannter ZIP-Name.")
+    return zipname
 
 
 def _sudo(profil, roh=False):
@@ -234,11 +246,14 @@ def _b_entpacken(pr, lauf, z, roh):
     o = orte(pr)
     paket = lauf.get("paket") or {}
     summe = paket.get("sha256") or ("<Prüfsumme aus Schritt „Version laden“>" if roh else "")
-    if not roh and not _SHA_RE.match(summe):
-        raise ValueError("Erst Schritt „Version laden“ abschließen.")
-    return (f"cd {q(o['e'])} && echo {q(summe + '  ' + o['zipname'])} | sha256sum -c - && "
+    zipname = paket.get("zipname") or (o["name"] + ".signier-JJJJMMTT-hhmm.zip" if roh else "")
+    if not roh:
+        if not _SHA_RE.match(summe):
+            raise ValueError("Erst Schritt „Version laden“ abschließen.")
+        _zip_pruefen(o, zipname)
+    return (f"cd {q(o['e'])} && echo {q(summe + '  ' + zipname)} | sha256sum -c - && "
             f"if [ -e {q(o['name'])} ]; then {_abbruch(o['name'] + ' gibt es noch - nichts entpackt')}; "
-            f"else unzip -q {q(o['zipname'])} && ls -la {q(o['name'])}; fi")
+            f"else unzip -q {q(zipname)} && ls -la {q(o['name'])}; fi")
 
 
 def _b_bau_vorpruefung(pr, lauf, z, roh):
@@ -248,13 +263,13 @@ def _b_bau_vorpruefung(pr, lauf, z, roh):
 def _b_bau_pruefen(pr, lauf, z, roh):
     # Container läuft („Nur neu bauen“): im laufenden Container prüfen
     return (f"cd {q(orte(pr)['p'])} && {{ {compose(pr, roh)} exec dashboard python app.py --bau-pruefen; "
-            "echo Ergebnis=$?; }")
+            "rc=$?; if [ $rc -le 2 ]; then echo Ergebnis=$rc; else echo Ergebnis=$rc - keine Pruefung, Fehler melden; fi; }")
 
 
 def _b_bau_pruefen_run(pr, lauf, z, roh):
     # Container angehalten („Neue Version installieren“): einmalig starten, nur die Prüfung
     return (f"cd {q(orte(pr)['p'])} && {{ {compose(pr, roh)} run --rm --no-deps --entrypoint python dashboard "
-            "app.py --bau-pruefen; echo Ergebnis=$?; }")
+            "app.py --bau-pruefen; rc=$?; if [ $rc -le 2 ]; then echo Ergebnis=$rc; else echo Ergebnis=$rc - keine Pruefung, Fehler melden; fi; }")
 
 
 def _b_bauen(pr, lauf, z, roh):
@@ -284,7 +299,14 @@ def _b_alt_loeschen(pr, lauf, z, roh):
 
 def _b_zip_loeschen(pr, lauf, z, roh):
     o = orte(pr)
-    return f"cd {q(o['e'])} && rm -- {q(o['zipname'])} && ls -la"
+    zips = list(z.get("zips") or [])
+    if roh and not zips:
+        zips = [o["name"] + ".signier-JJJJMMTT-hhmm.zip"]
+    if not zips:
+        raise ValueError("Es ist keine vom Werkzeug hochgeladene ZIP bekannt - Schritt überspringen.")
+    for n in zips if not roh else []:
+        _zip_pruefen(o, n)
+    return f"cd {q(o['e'])} && rm -- {' '.join(q(n) for n in zips)}; ls -la"
 
 
 def _b_images(pr, lauf, z, roh):
@@ -465,7 +487,9 @@ SCHRITTE = {
                        "usw. im Programmordner genau der signierten Version entsprechen - bevor daraus ein neues Image "
                        "mit root-Rechten entsteht.",
                        "Der Container ist angehalten; für die Prüfung startet „docker compose run --rm“ ihn kurz nur mit "
-                       "Python (ohne Dashboard) und entfernt ihn danach wieder."],
+                       "Python (ohne Dashboard) und entfernt ihn danach wieder.",
+                       "Gibt es noch gar kein Image (erste Installation), würde compose es vorher aus den noch ungeprüften "
+                       "Dateien bauen - dann diesen Schritt nicht ausführen, sondern abbrechen."],
         "erwartet": "Eine Zeile „OK: …“, „HINWEIS: …“ oder „FEHLER: …“ und danach „Ergebnis=0“, „=1“ oder „=2“. "
                     "Steht keine solche Zeile da, „Fehler – Hilfe anzeigen“.",
         "fehler": [("Ergebnis=2 / FEHLER:", "Bau-Dateien aus der signierten Version neu holen, nicht bauen "
@@ -556,7 +580,8 @@ ABLAEUFE = {
                             "bauen", "starten:warnung",
                             "kontrolle", "images"]},
     "zurueck": {"titel": "Zur vorigen Version zurück",
-                "schritte": ["verbindung", "anhalten:optional", "wegstellen", "zurueckholen", "starten", "kontrolle"]},
+                "schritte": ["verbindung", "anhalten:optional", "wegstellen", "zurueckholen", "bau_vorpruefung",
+                             "bau_pruefen_run", "bauen", "starten", "kontrolle"]},
     "aufraeumen": {"titel": "Aufräumen (alter Ordner, ZIP, Images)",
                    "schritte": ["verbindung", "alt_loeschen", "zip_loeschen", "images"]},
 }
@@ -660,7 +685,11 @@ def http_pruefen(url, timeout=10):
         e.close()
     except (ssl.SSLError, ssl.CertificateError):
         return {"ok": False, "text": "Antwortet, aber das https-Zertifikat ist nicht gültig (nicht weiter geprüft)."}
-    except (urllib.error.URLError, OSError) as e:
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, (ssl.SSLError, ssl.CertificateError)):
+            return {"ok": False, "text": "Antwortet, aber das https-Zertifikat ist nicht gültig (nicht weiter geprüft)."}
+        return {"ok": False, "text": f"Keine Antwort ({e.__class__.__name__}) - läuft der Container schon? Etwas warten."}
+    except OSError as e:
         return {"ok": False, "text": f"Keine Antwort ({e.__class__.__name__}) - läuft der Container schon? Etwas warten."}
     if code == 200:
         return {"ok": True, "text": "Dashboard antwortet (HTTP 200)."}
@@ -722,7 +751,9 @@ class Begleiter:
                     except ValueError as e:
                         befehl = f"(noch nicht möglich: {e})"
                 elif pr and s["art"] == "scp":
-                    befehl = f"scp -P {pr.get('port')} -- <geprüfte ZIP> {pr.get('benutzer')}@{ziel_host(pr)}:{orte(pr)['zip']}"
+                    zn = ((lauf or {}).get("paket") or {}).get("zipname") or orte(pr)["name"] + ".signier-JJJJMMTT-hhmm.zip"
+                    befehl = (f"scp -P {pr.get('port')} -- <geprüfte ZIP> "
+                              f"{pr.get('benutzer')}@{ziel_host(pr)}:{orte(pr)['e']}/{zn}")
                 status = ((lauf or {}).get("status") or {}).get(str(i), "offen") if lauf else "offen"
                 schritte.append({k: s.get(k) for k in ("id", "titel", "art", "optional", "erklaerung", "erwartet",
                                                        "bestaetigung", "rueckfrage")}
@@ -731,7 +762,8 @@ class Begleiter:
             o = orte(pr) if pr else {}
             return {"profil": pr, "ablaeufe": {k: v["titel"] for k, v in ABLAEUFE.items()}, "ablauf": ablauf,
                     "lauf": {k: lauf.get(k) for k in ("ablauf", "index", "paket")} if lauf else None,
-                    "schritte": schritte, "alt": z.get("alt") or "",
+                    "schritte": schritte, "alt": z.get("alt") or "", "zips": list(z.get("zips") or []),
+                    "bau_gesperrt": bool(z.get("bau_gesperrt")),
                     "name": o.get("name", ""), "protokoll": os.path.join(self.ordner, PROTOKOLL_DATEI)}
 
     # -- Profil -------------------------------------------------------------
@@ -742,8 +774,11 @@ class Begleiter:
                 raise ValueError("Während ein Ablauf läuft, bleibt das Profil fest - erst abschließen oder abbrechen.")
             neu = profil_pruefen(p, quellen)
             alt = z.get("profil") or {}
-            if alt.get("programmordner") and alt["programmordner"] != neu["programmordner"]:
-                z["alt"] = ""   # gehört zum alten Programmordner
+            if (z.get("alt") or z.get("zips")) and alt and (alt.get("host") != neu["host"]
+                                                            or alt.get("programmordner") != neu["programmordner"]):
+                raise ValueError("Host und Programmordner bleiben fest, solange ein beiseitegelegter Ordner oder eine "
+                                 "hochgeladene ZIP gemerkt ist (sie gehören zu diesem Gerät und Ordner). Erst "
+                                 "„Zur vorigen Version zurück“ bzw. „Aufräumen“ - oder den gemerkten Ordner vergessen.")
             z["profil"] = neu
             self._speichern(z)
             return self.ansicht()
@@ -765,7 +800,8 @@ class Begleiter:
             if ablauf == "installieren" and not pr.get("quelle"):
                 raise ValueError("Im QNAP-Profil ist kein Signier-Profil (GitHub-Repository) gewählt.")
             pr["root"] = None   # fragt Schritt „Verbindung testen“ jedes Mal neu ab
-            z["lauf"] = {"ablauf": ablauf, "index": 0, "status": {}, "marke": None, "geplant": None}
+            z["lauf"] = {"ablauf": ablauf, "index": 0, "status": {}, "marke": None, "geplant": None,
+                         "id": secrets.token_hex(8), "schritte": [x["id"] for x in schritte]}
             self._speichern(z)
             self.protokollieren(ablauf, "-", "Ablauf begonnen")
             return self.ansicht()
@@ -781,6 +817,18 @@ class Begleiter:
             self._speichern(z)
             if alt:
                 self.protokollieren("-", "-", "gemerkten alten Ordner vergessen", alt)
+            return self.ansicht()
+
+    def sperre_aufheben(self):
+        """Bau-Sperre (Ergebnis 2) bewusst aufheben - nur durch den Benutzer,
+        z. B. nach dem Neuholen der Bau-Dateien von Hand; wird protokolliert."""
+        with self.lock:
+            z = self._zustand()
+            if z.get("lauf"):
+                raise ValueError("Erst den laufenden Ablauf abschließen oder abbrechen.")
+            if z.pop("bau_gesperrt", None):
+                self._speichern(z)
+                self.protokollieren("-", "-", "Bau-Sperre vom Benutzer aufgehoben")
             return self.ansicht()
 
     def abbrechen(self):
@@ -801,6 +849,9 @@ class Begleiter:
         if not lauf:
             raise ValueError("Es läuft kein Ablauf.")
         schritte = _schritte(lauf["ablauf"])
+        if lauf.get("schritte") and lauf["schritte"] != [x["id"] for x in schritte]:
+            raise ValueError("Der Ablauf hat sich seit dem Beginn geändert (Update des Werkzeugs) - bitte abbrechen und "
+                             "neu beginnen.")
         i = lauf["index"]
         if i >= len(schritte):
             raise ValueError("Der Ablauf ist abgeschlossen.")
@@ -818,6 +869,11 @@ class Begleiter:
             lauf["geplant_alt"] = lauf.get("beiseite_gestartet") or alt_name(o["name"], self.jetzt())
         if s["id"] == "wegstellen":
             lauf["geplant_kaputt"] = o["name"] + ".kaputt-" + time.strftime("%Y%m%d-%H%M", time.localtime(self.jetzt()))
+        if s["art"] in ("ssh", "scp") and os.name == "nt" and self.prog is None:
+            exe = windows_programme()[s["art"]]
+            if not os.path.isfile(exe):
+                raise ValueError(f"{exe} fehlt - in Windows den „OpenSSH-Client“ einschalten (Einstellungen → System → "
+                                 "Optionale Features).")
         if s["art"] == "ssh":
             befehl = s["befehl"](pr, lauf, z, False)
             programm, zeile = befehlszeile(ssh_argv(pr, befehl, self.prog), self.prog)
@@ -826,7 +882,7 @@ class Begleiter:
             paket = lauf.get("paket") or {}
             if not paket.get("zip"):
                 raise ValueError("Erst Schritt „Version laden und prüfen“ abschließen.")
-            argv = scp_argv(pr, paket["zip"], o["zip"], self.prog)
+            argv = scp_argv(pr, paket["zip"], o["e"] + "/" + _zip_pruefen(o, paket.get("zipname")), self.prog)
             programm, zeile = befehlszeile(argv, self.prog)
             return f"scp -P {pr['port']} -- {paket['zip']} {argv[-1]}", programm, zeile
         return "", "", ""
@@ -847,7 +903,10 @@ class Begleiter:
             lauf, s, i = self._aktuell(z, schritt_id)
             if s["art"] == "anleitung":
                 raise ValueError("Dieser Schritt ist nur zum Lesen.")
-            if s["id"] == "bauen" and lauf.get("bau_gesperrt"):
+            if lauf["status"].get(str(i)) == "laedt":
+                raise ValueError("Die Version wird gerade geladen und geprüft - bitte warten. (Hängt es nach einem "
+                                 "Neustart des Werkzeugs: Ablauf abbrechen und neu beginnen.)")
+            if s["id"] == "bauen" and (lauf.get("bau_gesperrt") or z.get("bau_gesperrt")):
                 raise ValueError("Neubau gesperrt: Die Bau-Dateien passen nicht zur Signatur (Ergebnis 2). "
                                  "Bau-Dateien aus der signierten Version neu holen, nicht bauen.")
             befehl, programm, zeile = self._planen(z, lauf, s, pr)
@@ -875,32 +934,51 @@ class Begleiter:
             erwartet = self._erwartet_name(s, pr, z)
             if erwartet is not None and str(p.get("name") or "") != erwartet:
                 raise ValueError(f"Zur Sicherheit bitte genau „{erwartet}“ abtippen.")
-            if s["art"] == "lokal":
-                if paket is None:
-                    raise ValueError("Version kann nicht geladen werden.")
-                tag = str(p.get("tag") or "")
-                if not _TAG_RE.match(tag):
-                    raise ValueError("Bitte eine Version (Tag v…) wählen.")
-                self.protokollieren(lauf["ablauf"], s["id"], "gestartet", tag)
-                try:
-                    ergebnis = paket(pr, tag, orte(pr)["name"])
-                except ValueError as e:
-                    lauf["status"][str(i)] = "fehler"
-                    self._speichern(z)
-                    self.protokollieren(lauf["ablauf"], s["id"], "Fehler beim Laden", str(e)[:300])
-                    raise
-                lauf["paket"] = ergebnis
-                befehl = f"{tag} geprüft, ZIP sha256 {ergebnis.get('sha256')}"
-            else:
+            if s["art"] != "lokal":
                 self.starter(geplant["programm"], geplant["zeile"], self.ordner)
-                befehl = geplant["befehl"]
-            lauf["status"][str(i)] = "laeuft"
-            lauf["ausgefuehrt"] = s["id"]
-            if s["id"] == "beiseite":
-                lauf["beiseite_gestartet"] = lauf.get("geplant_alt")
+                if s["art"] == "scp":   # diese ZIP gehört dem Werkzeug - „ZIP löschen“ darf sie entfernen
+                    zn = (lauf.get("paket") or {}).get("zipname")
+                    if zn and zn not in (z.get("zips") or []):
+                        z["zips"] = list(z.get("zips") or []) + [zn]
+                return self._ausgefuehrt(z, lauf, s, i, geplant["befehl"])
+            if paket is None:
+                raise ValueError("Version kann nicht geladen werden.")
+            tag = str(p.get("tag") or "")
+            if not _TAG_RE.match(tag):
+                raise ValueError("Bitte eine Version (Tag v…) wählen.")
+            lauf["status"][str(i)] = "laedt"
             self._speichern(z)
-            self.protokollieren(lauf["ablauf"], s["id"], "ausgeführt", befehl)
-            return {**self.ansicht(), "ergebnis": lauf.get("paket") if s["art"] == "lokal" else None}
+            self.protokollieren(lauf["ablauf"], s["id"], "gestartet", tag)
+            pr_l, lauf_id = dict(pr), lauf.get("id")
+        # Laden und Prüfen dauert - ohne Sperre, damit Abbrechen, Anzeige usw. weiter gehen
+        try:
+            ergebnis, fehler = paket(pr_l, tag, orte(pr_l)["name"]), None
+        except ValueError as e:
+            ergebnis, fehler = None, e
+        except Exception as e:   # nie auf „lädt“ hängen bleiben
+            ergebnis, fehler = None, ValueError(f"Unerwarteter Fehler beim Laden ({e.__class__.__name__}: {e}).")
+        with self.lock:
+            z = self._zustand()
+            lauf = z.get("lauf")
+            if not lauf or lauf.get("id") != lauf_id or lauf.get("index") != i:
+                raise ValueError("Der Ablauf wurde inzwischen abgebrochen oder geändert - Version nicht übernommen.")
+            if fehler is not None:
+                lauf["status"][str(i)] = "fehler"
+                self._speichern(z)
+                self.protokollieren(lauf["ablauf"], s["id"], "Fehler beim Laden", str(fehler)[:300])
+                raise fehler
+            ergebnis["zipname"] = zip_name(orte(pr_l)["name"], self.jetzt())
+            lauf["paket"] = ergebnis
+            return self._ausgefuehrt(z, lauf, s, i, f"{tag} geprüft, ZIP sha256 {ergebnis.get('sha256')}")
+
+    def _ausgefuehrt(self, z, lauf, s, i, befehl):
+        lauf["status"][str(i)] = "laeuft"
+        lauf["ausgefuehrt"] = s["id"]
+        if s["id"] == "beiseite":
+            lauf["beiseite_gestartet"] = lauf.get("geplant_alt")
+        self._speichern(z)
+        self.protokollieren(lauf["ablauf"], s["id"], "ausgeführt", befehl)
+        return {**self.ansicht(), "ergebnis": lauf.get("paket") if s["art"] == "lokal" else None}
 
     def rueckmelden(self, schritt_id, ergebnis, p):
         with self.lock:
@@ -911,6 +989,8 @@ class Begleiter:
             if ergebnis == "uebersprungen":
                 if not s["optional"]:
                     raise ValueError("Dieser Schritt ist nicht optional.")
+                if status in ("laeuft", "laedt"):
+                    raise ValueError("Der Schritt wurde schon ausgeführt - bitte das Ergebnis melden (geklappt/Fehler).")
             elif ergebnis in ("geklappt", "fehler"):
                 if s["art"] != "anleitung" and (status != "laeuft" or lauf.get("ausgefuehrt") != s["id"]):
                     raise ValueError("Der Schritt wurde noch nicht ausgeführt.")
@@ -922,6 +1002,10 @@ class Begleiter:
                     if p.get("treffer") not in ("0", "mehr"):
                         raise ValueError("Bitte angeben, welche Zahl angezeigt wurde (0 oder mehr).")
                     if p["treffer"] == "0":
+                        if z.get("bau_gesperrt"):
+                            raise ValueError("Die letzte Bau-Prüfung ergab Ergebnis 2 (Neubau gesperrt). Ohne Prüfung "
+                                             "geht es nicht weiter: erst eine signierte Version installieren - oder die "
+                                             "Sperre bewusst aufheben.")
                         if p.get("ohne_pruefung") is not True:
                             raise ValueError("Programm älter als 1.8.8 – Bau-Dateien nicht prüfbar. Weiter nur nach "
                                              "ausdrücklicher Bestätigung.")
@@ -936,6 +1020,7 @@ class Begleiter:
                     if e == "1" and p.get("hinweis_bestaetigt") is not True:
                         raise ValueError("Ergebnis 1 (Hinweis): Neubau nur nach ausdrücklicher Bestätigung.")
                     lauf["bau_gesperrt"] = False
+                    z.pop("bau_gesperrt", None)
                     notiz = "Ergebnis=" + e + (" (Hinweis bestätigt)" if e == "1" else "")
                 if s["rueckfrage"] == "root":
                     if p.get("root") not in ("ja", "nein"):
@@ -949,11 +1034,14 @@ class Begleiter:
                     z["alt"] = lauf.get("beiseite_gestartet") or ""
                 if s["id"] in ("alt_loeschen", "zurueckholen"):
                     z["alt"] = ""
+                if s["id"] == "zip_loeschen":
+                    z.pop("zips", None)
             elif s["id"] == "beiseite" and lauf.get("beiseite_gestartet"):
                 # unklar, ob umbenannt wurde: den Namen für den Rückweg merken
                 z["alt"] = lauf["beiseite_gestartet"]
             if ergebnis == "fehler" and s["rueckfrage"] == "bauergebnis":
                 lauf["bau_gesperrt"] = True   # gilt, bis eine Wiederholung 0 bzw. bestätigt 1 ergibt
+                z["bau_gesperrt"] = True      # auch nach Abbrechen und Neubeginn
                 if str(p.get("bauergebnis") or "") == "2":
                     notiz = "Ergebnis=2 - Neubau gesperrt"
             lauf["status"][str(i)] = {"geklappt": "erledigt", "fehler": "fehler", "uebersprungen": "uebersprungen"}[ergebnis]

@@ -42,6 +42,7 @@ MAX_DATEI = 512 * 1024 * 1024
 MAX_SIGNATUR = 4 * 1024 * 1024
 _MAX_TIEFE = 64
 _REPARSE_POINT = 0x400
+_NAME_SURROGATE = 0x20000000   # IO_REPARSE_TAG_NAME_SURROGATE (Symlink, Junction …)
 
 
 class SignaturFehler(Exception):
@@ -49,8 +50,16 @@ class SignaturFehler(Exception):
 
 
 def _art(st):
-    if stat.S_ISLNK(st.st_mode) or getattr(st, "st_file_attributes", 0) & _REPARSE_POINT:
+    if stat.S_ISLNK(st.st_mode):
         return "verknuepfung"
+    if getattr(st, "st_file_attributes", 0) & _REPARSE_POINT:
+        # Windows: Symlinks und Junctions sind „Name-Surrogates“ (lstat öffnet sie
+        # selbst und liefert ihr Tag). Andere Reparse-Points (OneDrive-Platzhalter,
+        # Deduplizierung) löst Windows auf - Tag 0, normale Datei/normaler Ordner.
+        # Ohne st_reparse_tag (sehr altes Python): vorsichtshalber Verknüpfung.
+        tag = getattr(st, "st_reparse_tag", None)
+        if tag is None or tag & _NAME_SURROGATE:
+            return "verknuepfung"
     if stat.S_ISREG(st.st_mode):
         return "datei"
     if stat.S_ISDIR(st.st_mode):
@@ -170,7 +179,9 @@ def pruefen(wurzel, oeffentlicher_schluessel, ausschluss=None):
     if kompilate:
         raise SignaturFehler("Kompilierte Python-Dateien gefunden (nicht geprüft, würden aber geladen): "
                              + ", ".join(kompilate[:10]) + " - vor der Prüfung löschen")
-    soll = sig["dateien"]
+    # Namen in Unicode-Normalform NFC vergleichen (macOS liefert z. B. NFD)
+    ist = {unicodedata.normalize("NFC", n): h for n, h in ist.items()}
+    soll = {unicodedata.normalize("NFC", n): h for n, h in sig["dateien"].items()}
     abweichend = sorted(n for n in set(ist) | set(soll) if ist.get(n) != soll.get(n))
     if abweichend:
         raise SignaturFehler("Dateien passen nicht zur Signatur: " + ", ".join(

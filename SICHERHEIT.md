@@ -376,10 +376,32 @@ Der Bereich leitet SSH-Schritte auf einer QNAP an. Er ist bewusst eng gehalten:
   nicht verfolgt. Angezeigt wird nur der Statuscode.
 - **Daten:** Profil und Ablauf in `qnap.json`, Protokoll in `qnap-protokoll.txt` (Zeit,
   Ablauf, Schritt, Ereignis, Befehl; rotiert ab 512 KB). Beides liegt im Datenordner. Der
-  Bereich liest aus `profile.json` nur Repository, Regel und öffentlichen Schlüssel sowie
-  das Token für den Download. Auf private Schlüssel greift er nicht zu.
+  Bereich liest aus `profile.json` nur Repository, Regel, Ausnahmen und öffentlichen
+  Schlüssel sowie das Token für den Download. Auf private Schlüssel greift er nicht zu.
+- **Gemerktes:** Rückweg (`.alt`-Ordner), die vom Werkzeug hochgeladenen ZIPs (eigener Name
+  `<Name>.signier-JJJJMMTT-hhmm.zip`, nur diese löscht „Aufräumen“) und eine Bau-Sperre nach
+  Ergebnis 2 gelten über einen Abbruch hinaus. Host und Programmordner lassen sich nicht
+  ändern, solange etwas davon gemerkt ist. Ein Lauf merkt sich die Liste seiner Schritte -
+  ändert ein Update die Abläufe, muss er neu begonnen werden.
+
+### Lokale Oberfläche
+
+Die Seite läuft nur auf `127.0.0.1` mit einem Zufallsschlüssel in der Adresse; jede Anfrage
+muss ihn mitschicken, Host und Origin werden geprüft. Es läuft nur **eine** Instanz je
+Windows-Benutzer (Sperre `instanz.lock` im Datenordner): Ein zweiter Start öffnet die
+laufende Seite (Adresse in `adresse.txt`, nur für diesen Benutzer lesbar) statt einer zweiten
+Instanz, die `profile.json` bzw. `qnap.json` überschreiben könnte. Beenden ist gesperrt,
+solange ein Vorgang läuft; ohne Lebenszeichen der Seite beendet sich das Werkzeug nach
+10 Minuten (nie mitten in einem Vorgang).
 
 ## 8. Bekannte Grenzen
+
+- Die Bau-Signatur wird etwas strenger geprüft als im Dashboard: Base64 mit Zeilenumbruch
+  oder fremden Zeichen gilt im Werkzeug als ungültig, im Dashboard nicht; ein nicht lesbarer
+  Unterordner ist im Werkzeug ein Fehler, im Dashboard nur ein Hinweis („fehlt“).
+- „Ordner signieren“ nimmt alle Dateien des Ordners, auch nicht eingecheckte. Bei einem
+  Git-Arbeitsordner weist das Werkzeug darauf hin; für genau den Repository-Stand „Von GitHub
+  laden, signieren und hochladen“ verwenden.
 
 - Die exe hat keine Authenticode-Signatur. Windows SmartScreen warnt deshalb
   beim ersten Start nach einem Browser-Download.

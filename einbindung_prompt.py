@@ -70,7 +70,9 @@ verlässt meinen Rechner nie. Deine Aufgabe ist, das Repository dafür vorzubere
    unsignierten Stand –, bricht das Signieren ab, **bevor** etwas hochgeladen wird.
 
 Pfade sind relativ und mit `/`. Verknüpfungen (Symlinks, Junctions), Sonderdateien und Pfade,
-die unter Windows gleich wären (Groß/Klein, Unicode-Normalform), sind Fehler. Beim Laden von
+die unter Windows gleich wären (Groß/Klein, Unicode-Normalform), sind Fehler. Andere
+Windows-Reparse-Points (z. B. OneDrive-Platzhalter) gelten als normale Dateien. Beim Prüfen
+werden Dateinamen in Unicode-Normalform NFC verglichen (macOS liefert sonst NFD). Beim Laden von
 GitHub werden außerdem abgelehnt: unter Windows reservierte Namen (z. B. `aux.py`, `con.txt`),
 die Zeichen `<>:"|?*\`, Punkt oder Leerzeichen am Namensende, Pfade über 240 Zeichen, mehr
 als 32 Ordnerebenen, Dateien über 200 MB.
@@ -85,6 +87,10 @@ als 32 Ordnerebenen, Dateien über 200 MB.
    - Keine symbolischen Links und keine Submodule im signierten Bestand.
    - In `.gitattributes` kein `export-ignore` und kein `export-subst` für Dateien, die zum
      Bestand gehören (das GitHub-Archiv würde sonst vom Repository abweichen).
+   - Kein Git-LFS für Dateien im Bestand (das GitHub-Archiv enthält dann nur die Zeiger, die
+     Prüfsummen weichen ab).
+   - Der Zweig `{{ZWEIG}}` darf keine Regel haben, die direkte Commits verbietet – das Werkzeug
+     lädt die Signatur per Git-API direkt hoch (nur vorspulen, nie überschreiben).
    - Dateien, die erst zur Laufzeit entstehen (Logs, Einstellungen, Daten), dürfen im
      installierten Programmordner nicht zwischen den signierten Dateien liegen – oder sie
      müssen als Ausnahme im Profil stehen. Liste mir alle Kandidaten auf, damit ich die

@@ -20,6 +20,8 @@ import base64
 import contextlib
 import fnmatch
 import hashlib
+import html
+import http.client
 import io
 import json
 import os
@@ -64,7 +66,7 @@ EXE_NAME = "Signier-Werkzeug.exe"
 # SHA-256 von Pruefmodul/signatur_pruefen.py dieses Stands über den Inhalt mit
 # LF-Zeilenenden (ein Windows-Checkout hat CRLF) - steht im Prompt zur Einbindung
 # (die Sitzung vergleicht damit); tests/test_einbindung.py prüft sie
-PRUEFMODUL_SHA256 = "53f1c175e679d063568d512fe925c49ec6db13169a005559e95021c8059a6b4b"
+PRUEFMODUL_SHA256 = "e338f2a70ac50202ed80795ec27b4af86a62bf160cfef0beeb670726ea4c0c35"
 _VERSION_RE = re.compile(r"^(\d{1,4})\.(\d{1,4})\.(\d{1,4})$")
 _EXE_MIN, _EXE_MAX = 5 * 1024 * 1024, 150 * 1024 * 1024
 MB = 1024 * 1024
@@ -95,13 +97,22 @@ _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _REPARSE_POINT = 0x400   # FILE_ATTRIBUTE_REPARSE_POINT (Windows: Symlinks, Junctions)
+_NAME_SURROGATE = 0x20000000   # IO_REPARSE_TAG_NAME_SURROGATE (Symlink, Junction …)
 
 
 def _art(st):
     """Art eines Eintrags laut lstat: 'datei', 'ordner', 'verknuepfung' oder
     'sonstiges' (FIFO, Socket, Gerät …)."""
-    if stat.S_ISLNK(st.st_mode) or getattr(st, "st_file_attributes", 0) & _REPARSE_POINT:
+    if stat.S_ISLNK(st.st_mode):
         return "verknuepfung"
+    if getattr(st, "st_file_attributes", 0) & _REPARSE_POINT:
+        # Windows: Symlinks und Junctions sind „Name-Surrogates“ (lstat öffnet sie
+        # selbst und liefert ihr Tag). Andere Reparse-Points (OneDrive-Platzhalter,
+        # Deduplizierung) löst Windows auf - Tag 0, normale Datei/normaler Ordner.
+        # Ohne st_reparse_tag (sehr altes Python): vorsichtshalber Verknüpfung.
+        tag = getattr(st, "st_reparse_tag", None)
+        if tag is None or tag & _NAME_SURROGATE:
+            return "verknuepfung"
     if stat.S_ISREG(st.st_mode):
         return "datei"
     if stat.S_ISDIR(st.st_mode):
@@ -229,7 +240,10 @@ def _atomar_posix(ordner, name, daten, modus, pruefen):
         _ziel_pruefen(lambda: os.lstat(name, dir_fd=dfd), name)
         os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
         tmp = None
-        os.fsync(dfd)
+        try:
+            os.fsync(dfd)   # Ordnereintrag sichern; manche Netzlaufwerke können das nicht - Datei ist schon ersetzt
+        except OSError:
+            pass
     finally:
         if tmp:
             try:
@@ -441,6 +455,12 @@ def _signatur_json_pruefen(daten):
     return sig
 
 
+def _groesse_pruefen(inhalt, name=SIGNATUR_DATEI):
+    if len(inhalt.encode("utf-8")) > MAX_SIGNATUR_BYTES:
+        raise ValueError(f"{name} würde größer als {MAX_SIGNATUR_BYTES // MB} MB - das lehnen Werkzeug, Prüfmodul und "
+                         "Dashboard ab. Zu viele bzw. zu lange Dateinamen: Ausnahmen ergänzen. Nichts geschrieben.")
+
+
 def signieren(wurzel, profil, kennwort, version=None):
     privat = privat_laden(schluessel_pfad(profil), kennwort)
     if oeffentlich_text(privat) != profil.get("oeffentlich"):
@@ -452,6 +472,7 @@ def signieren(wurzel, profil, kennwort, version=None):
     signatur = privat.sign(nachricht(version, dateien))
     inhalt = json.dumps({"format": FORMAT, "version": version, "dateien": dateien,
                          "signatur": base64.b64encode(signatur).decode("ascii")}, indent=1, sort_keys=True) + "\n"
+    _groesse_pruefen(inhalt)
     atomar_schreiben(wurzel, SIGNATUR_DATEI, inhalt.encode("utf-8"), 0o644, _signatur_json_pruefen)
     return version, len(dateien), inhalt
 
@@ -466,7 +487,7 @@ def pruefen(wurzel, oeffentlich, regel="alle", ausschluss=None):
             raise ValueError
     except FileNotFoundError:
         return {"ok": False, "fehler": "Keine SIGNATUR.json in diesem Ordner."}
-    except (OSError, ValueError, UnicodeDecodeError) as e:
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError) as e:
         text = str(e) if "keine normale Datei" in str(e) else "Keine gültige SIGNATUR.json in diesem Ordner."
         return {"ok": False, "fehler": text}
     try:
@@ -483,7 +504,9 @@ def pruefen(wurzel, oeffentlich, regel="alle", ausschluss=None):
         return {"ok": False, "version": sig.get("version"), "abweichend": kompilate[:50], "arten": {},
                 "fehler": "Kompilierte Python-Dateien (__pycache__/, *.pyc) gefunden: nicht signiert, würden aber geladen "
                           "- das Prüfmodul lehnt sie ab. Vor dem Verteilen löschen."}
-    soll = sig["dateien"]
+    # Namen in Unicode-Normalform NFC vergleichen (macOS liefert z. B. NFD) - wie im Prüfmodul
+    ist = {unicodedata.normalize("NFC", n): h for n, h in ist.items()}
+    soll = {unicodedata.normalize("NFC", n): h for n, h in sig["dateien"].items()}
     arten = {n: ("fehlt" if n not in ist else "zusätzlich" if n not in soll else "verändert")
              for n in set(ist) | set(soll) if ist.get(n) != soll.get(n)}
     abweichend = sorted(arten)
@@ -515,29 +538,48 @@ def bau_pruefsumme_daten(daten):
 
 
 def bau_bereich(rel):
-    """Gehört der relative Pfad (mit /) zu den Bau-Dateien?"""
+    """Gehört der relative Pfad (mit /) zu den Bau-Dateien? Wie im Dashboard
+    (os.walk): Ordner „__pycache__“ und Dateien „*.pyc“ zählen nicht."""
     teile = rel.split("/")
     if rel in BAU_DATEIEN:
         return True
     if not any(rel.startswith(o + "/") for o in BAU_ORDNER):
         return False
-    return "__pycache__" not in teile and not rel.endswith(".pyc")
+    return "__pycache__" not in teile[:-1] and not rel.endswith(".pyc")
+
+
+def _genau_vorhanden(wurzel, rel):
+    """Gibt es den Eintrag mit genau dieser Schreibweise? (Windows würde
+    „dockerfile“ sonst als „Dockerfile“ finden - das Dashboard unter Linux nicht.)"""
+    teile = rel.split("/")
+    for i, name in enumerate(teile):
+        try:
+            if name not in os.listdir(os.path.join(wurzel, *teile[:i])):
+                return False
+        except OSError:
+            return False
+    return True
 
 
 def bau_dateiliste(wurzel):
-    """-> ({Pfad: Prüfsumme}, [unzulässige Einträge]) wie im Dashboard:
-    Verknüpfungen und Sonderdateien werden nicht verfolgt, sondern gemeldet."""
+    """-> ({Pfad: Prüfsumme}, [unzulässige Einträge]) wie im Dashboard
+    (_bau_dateiliste, os.walk): Verknüpfungen und Sonderdateien werden nicht
+    verfolgt, sondern gemeldet. Ordner (auch über Verknüpfung) „__pycache__“
+    und alles „*.pyc“, was kein Ordner ist, wird übergangen."""
     out, unzulaessig = {}, []
+
+    def voll(rel):
+        return os.path.join(wurzel, *rel.split("/"))
 
     def art(rel):
         try:
-            return _art(os.lstat(os.path.join(wurzel, *rel.split("/"))))
+            return _art(os.lstat(voll(rel)))
         except OSError:
             return "sonstiges"
     for name in BAU_DATEIEN:
-        if os.path.lexists(os.path.join(wurzel, name)):
+        if _genau_vorhanden(wurzel, name):
             if art(name) == "datei":
-                out[name] = bau_pruefsumme_daten(regulaer_lesen(os.path.join(wurzel, name)))
+                out[name] = bau_pruefsumme_daten(regulaer_lesen(voll(name)))
             else:
                 unzulaessig.append(name)
 
@@ -545,20 +587,29 @@ def bau_dateiliste(wurzel):
         if tiefe > _MAX_TIEFE:
             unzulaessig.append(rel)
             return
-        for name in sorted(os.listdir(os.path.join(wurzel, *rel.split("/")))):
+        try:
+            namen = sorted(os.listdir(voll(rel)))
+        except OSError:
+            unzulaessig.append(rel)   # nicht lesbar: nicht still auslassen
+            return
+        for name in namen:
             r = rel + "/" + name
             a = art(r)
-            if a == "ordner":
-                if name != "__pycache__":
+            if a == "ordner" or (a == "verknuepfung" and os.path.isdir(voll(r))):   # wie os.walk: „dirs“
+                if name == "__pycache__":
+                    continue
+                if a == "ordner":
                     durch(r, tiefe + 1)
-            elif name == "__pycache__" or name.endswith(".pyc"):
+                else:
+                    unzulaessig.append(r)
+            elif name.endswith(".pyc"):
                 continue
             elif a == "datei":
-                out[r] = bau_pruefsumme_daten(regulaer_lesen(os.path.join(wurzel, *r.split("/"))))
+                out[r] = bau_pruefsumme_daten(regulaer_lesen(voll(r)))
             else:
                 unzulaessig.append(r)
     for ordner in BAU_ORDNER:
-        if not os.path.lexists(os.path.join(wurzel, *ordner.split("/"))):
+        if not _genau_vorhanden(wurzel, ordner):
             continue
         if art(ordner) != "ordner":
             unzulaessig.append(ordner)
@@ -615,12 +666,16 @@ def bau_pruefen(wurzel, oeffentlich):
         version = str(sig.get("version") or "")[:40]
         Ed25519PublicKey.from_public_bytes(base64.b64decode(oeffentlich, validate=True)).verify(
             base64.b64decode(str(sig.get("signatur") or ""), validate=True), bau_nachricht(version, sig["dateien"]))
-    except (OSError, ValueError, TypeError, UnicodeDecodeError, InvalidSignature) as e:
+    except (OSError, ValueError, TypeError, UnicodeDecodeError, RecursionError, InvalidSignature) as e:
         erg.update(stufe="fehler", text=f"{BAU_SIGNATUR_DATEI} ungültig ({e.__class__.__name__}) – Bau-Dateien stammen "
                                         "nicht vom Herausgeber oder wurden verändert.")
         return erg
     erg["version"] = version
-    ist, unzulaessig = bau_dateiliste(wurzel)
+    try:
+        ist, unzulaessig = bau_dateiliste(wurzel)
+    except (OSError, ValueError) as e:
+        erg.update(stufe="fehler", text=f"Bau-Dateien nicht lesbar ({e}).")
+        return erg
     soll = sig["dateien"]
     erg["veraendert"] = sorted(n for n in soll if n in ist and ist[n] != soll[n])
     erg["fehlt_datei"] = sorted(n for n in soll if n not in ist)
@@ -642,7 +697,10 @@ def bau_pruefen(wurzel, oeffentlich):
         hinweise.append("fehlen: " + ", ".join(erg["fehlt_datei"][:6]))
     if erg["zusaetzlich"]:
         hinweise.append("nicht signiert: " + ", ".join(erg["zusaetzlich"][:6]))
-    programm = ordner_version(wurzel)
+    try:   # wie das Dashboard: die ersten 40 Zeichen, dann gestrippt
+        programm = regulaer_lesen(os.path.join(wurzel, "VERSION"), 4096).decode("utf-8")[:40].strip()
+    except (OSError, ValueError, UnicodeDecodeError):
+        programm = ""
     if programm and version and programm != version:
         hinweise.append(f"Signatur gehört zu Version {version}, Programm ist {programm}")
     if hinweise:
@@ -678,6 +736,9 @@ def signieren_mit_bau(wurzel, profil, kennwort, git_bau=None):
                          "signatur": base64.b64encode(privat.sign(nachricht(version, dateien))).decode("ascii")},
                         indent=1, sort_keys=True) + "\n"
     bau_inhalt = bau_signatur_bauen(privat, version, bau) if bau else None
+    _groesse_pruefen(inhalt)
+    if bau_inhalt:
+        _groesse_pruefen(bau_inhalt, BAU_SIGNATUR_DATEI)
     oeffentlich = privat.public_key()
 
     def bau_gegenprobe(b):
@@ -804,10 +865,19 @@ def _keyring():
         kr = keyring.get_keyring()
     except Exception:
         return None
-    art = f"{type(kr).__module__}.{type(kr).__name__}".lower()
-    if getattr(kr, "priority", 0) <= 0 or any(w in art for w in ("fail", "null", "plaintext", "keyrings.alt")):
-        return None
-    return kr
+    def sicher(b):
+        art = f"{type(b).__module__}.{type(b).__name__}".lower()
+        try:
+            prio = float(getattr(b, "priority", 0) or 0)
+        except Exception:
+            prio = 0
+        return prio > 0 and not any(w in art for w in ("fail", "null", "plaintext", "keyrings.alt", "chainer"))
+    if "chainer" in type(kr).__name__.lower():
+        # Kette aus mehreren Backends: nicht die Kette nehmen (sie kann unsichere
+        # Datei-Speicher oder eine Kennwortabfrage in der Konsole enthalten),
+        # sondern das erste sichere Backend allein
+        return next((b for b in (getattr(kr, "backends", None) or []) if sicher(b)), None)
+    return kr if sicher(kr) else None
 
 
 def token_speicher_art():
@@ -919,6 +989,10 @@ def _adresse_pruefen(url, vorher=None):
     return host, t.port
 
 
+class _SchreibFehler(Exception):
+    pass
+
+
 def _lesen(r, limit, ziel):
     laenge = r.headers.get("Content-Length")
     if laenge and laenge.isdigit() and int(laenge) > limit:
@@ -932,9 +1006,14 @@ def _lesen(r, limit, ziel):
         if n > limit:
             raise ValueError("Antwort von GitHub zu groß - abgebrochen.")
         if ziel is not None:
-            ziel.write(b)
+            try:
+                ziel.write(b)
+            except OSError as e:
+                raise _SchreibFehler(e) from None
         else:
             teile.append(b)
+    if laenge and laenge.isdigit() and n != int(laenge) and not r.headers.get("Content-Encoding"):
+        raise ValueError(f"Download unvollständig ({n} von {laenge} Bytes) - Verbindung abgebrochen, bitte erneut versuchen.")
     return n if ziel is not None else b"".join(teile)
 
 
@@ -960,6 +1039,8 @@ def _anfrage(url, token=None, methode="GET", daten=None, kopf=None, timeout=60, 
         except urllib.error.HTTPError as e:
             ort = e.headers.get("Location") if e.headers else None
             code = e.code
+            if code in (403, 429) and e.headers and e.headers.get("x-ratelimit-remaining") == "0":
+                code = 429
             e.close()
             if code not in (301, 302, 303, 307, 308) or not ort:
                 raise HttpFehler(code) from None
@@ -968,15 +1049,20 @@ def _anfrage(url, token=None, methode="GET", daten=None, kopf=None, timeout=60, 
             vorher, url = url, urllib.parse.urljoin(url, ort)
             if token_ziel and _adresse_pruefen(url, vorher) != token_ziel:
                 token_ziel = None   # anderer Host: das Token ist für diese Kette erledigt
+        except _SchreibFehler as e:
+            raise ValueError(f"Download konnte nicht gespeichert werden ({e}) - Speicherplatz prüfen.") from None
+        except http.client.HTTPException as e:   # z. B. IncompleteRead
+            raise ValueError(f"Download unvollständig ({e.__class__.__name__}) - bitte erneut versuchen.") from None
         except (urllib.error.URLError, OSError) as e:
             raise ValueError(f"GitHub nicht erreichbar ({e.__class__.__name__}).") from None
     raise ValueError("Zu viele Weiterleitungen - abgebrochen.")
 
 
 _API_FEHLER = {401: "GitHub-Token ungültig oder abgelaufen.", 403: "Keine Berechtigung (Token braucht „Contents: Read and write“).",
-               404: "Repository oder Zweig nicht gefunden (bei privatem Repository: Token nötig).",
+               404: "Nicht gefunden (Repository, Zweig, Tag oder Datei; bei privatem Repository: Token nötig).",
                409: "GitHub meldet einen Konflikt - bitte erneut versuchen.",
-               422: "GitHub hat die Anfrage abgelehnt."}
+               422: "GitHub hat die Anfrage abgelehnt.",
+               429: "GitHub-Abfragelimit erreicht - bitte später erneut versuchen (mit gespeichertem Token ist das Limit höher)."}
 
 
 def _gh(pfad, token, methode="GET", daten=None, roh=False, timeout=60, limit=_JSON_MAX, ziel=None):
@@ -1012,7 +1098,12 @@ ZIP_GRENZEN = {
     "tiefe": 32,                  # Ordnerebenen
     "je_ordner": 5000,            # Einträge in einem Ordner
 }
-_WIN_RESERVIERT = re.compile(r"^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[0-9¹²³]|LPT[0-9¹²³])(\.[^.]*)?$", re.I)
+_WIN_RESERVIERT = re.compile(r"^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[0-9¹²³]|LPT[0-9¹²³])$", re.I)
+
+
+def _win_reserviert(teil):
+    """„NUL.tar.gz“, „con.a.b“, „nul .txt“ öffnen unter Windows das Gerät (wie ntpath.isreserved)."""
+    return bool(_WIN_RESERVIERT.match(teil.split(".")[0].rstrip(" ")))
 _WIN_VERBOTEN = frozenset('<>:"|?*\\')
 
 
@@ -1029,7 +1120,7 @@ def zip_pfad_teile(rel, grenzen=None):
         raise fehler
     teile = rel.split("/")
     for t in teile:
-        if t in ("", ".", "..") or t[-1] in " ." or _WIN_RESERVIERT.match(t) \
+        if t in ("", ".", "..") or t[-1] in " ." or _win_reserviert(t) \
                 or any(ord(c) < 32 or ord(c) == 127 or c in _WIN_VERBOTEN for c in t):
             raise fehler
     if len(rel) > g["pfad_zeichen"] or len(teile) > g["tiefe"]:
@@ -1439,6 +1530,11 @@ def werkzeug_veroeffentlichen(profil, kennwort, token):
         raise ValueError("Dieser Schlüssel passt nicht zum eingebauten Schlüssel des Werkzeugs.")
     rel = werkzeug_entwurf(token)
     version = rel["tag_name"].lstrip("v")
+    neueste, _ = werkzeug_neueste()
+    if neueste and _version_tupel(version) <= _version_tupel(neueste):
+        raise ValueError(f"Der Entwurf {version} ist nicht neuer als die veröffentlichte Version {neueste} - nicht "
+                         "veröffentlicht (sonst bekämen Installationen eine ältere Version angeboten). Alten Entwurf auf "
+                         "GitHub löschen.")
     exe = _herunterladen(_asset(rel, EXE_NAME)["url"], token)
     _exe_plausibel(exe)
     commit = entwurf_herkunft(rel, token, exe)
@@ -1501,8 +1597,8 @@ def werkzeug_neueste():
     """Neueste veröffentlichte Version -> (Version, Release) oder (None, None)."""
     try:
         rel = _gh(f"/repos/{WERKZEUG_REPO}/releases/latest", None, timeout=20)
-    except ValueError as e:
-        if "nicht gefunden" in str(e):
+    except GitHubFehler as e:
+        if e.code == 404:
             return None, None
         raise
     version = str(rel.get("tag_name") or "").lstrip("v")
@@ -1542,10 +1638,20 @@ def werkzeug_update():
         os.replace(exe_pfad, alt)   # laufende exe darf umbenannt, aber nicht überschrieben werden
         try:
             os.replace(neu, exe_pfad)
-        except OSError:
-            os.replace(alt, exe_pfad)
+        except OSError as e:
+            try:
+                os.replace(alt, exe_pfad)
+            except OSError:
+                # beide Schritte gescheitert: nichts löschen, Lage genau melden
+                fehler = ValueError(f"Das Programm konnte nicht ersetzt werden ({e.__class__.__name__}), und die "
+                                    f"bisherige Version ließ sich nicht zurückbenennen. Bisherige Version: {alt} - neue, "
+                                    f"geprüfte Version: {neu}. Bitte eine davon in {os.path.basename(exe_pfad)} umbenennen.")
+                fehler.neu_behalten = True
+                raise fehler from None
             raise
     except (OSError, ValueError) as e:
+        if getattr(e, "neu_behalten", False):
+            raise
         try:
             os.remove(neu)
         except OSError:
@@ -1575,8 +1681,14 @@ def _alte_exe_entfernen():
 def _powershell(skript):
     if os.name != "nt":
         raise ValueError("Auswahlfenster nur unter Windows - bitte den Pfad eintippen.")
-    r = subprocess.run(["powershell", "-NoProfile", "-STA", "-Command", skript], capture_output=True, text=True,
-                       timeout=600, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    skript = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + skript   # Pfade mit Umlauten
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-STA", "-Command", skript], capture_output=True,
+                           encoding="utf-8", errors="replace", timeout=600,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired:
+        raise ValueError("Das Auswahlfenster war 10 Minuten offen und wurde geschlossen - bitte erneut wählen "
+                         "(es liegt evtl. hinter dem Browser).") from None
     return (r.stdout or "").strip()
 
 
@@ -1603,6 +1715,20 @@ def _profil(d, pid):
     if not p:
         raise ValueError("Profil nicht gefunden.")
     return p
+
+
+def _schluessel_ablegen(d, pr, pem, privat):
+    neu_anlegen(schluessel_pfad(pr), pem, 0o600)   # exklusiv, folgt keiner Verknüpfung
+    pr["oeffentlich"] = oeffentlich_text(privat)
+    try:
+        profile_speichern(d)
+    except BaseException:
+        pr["oeffentlich"] = ""
+        try:
+            os.remove(schluessel_pfad(pr))   # sonst gälte das Profil als „mit Schlüssel“ ohne öffentlichen Schlüssel
+        except OSError:
+            pass
+        raise
 
 
 def _ansicht(d):
@@ -1636,7 +1762,7 @@ def _token_meldung(d):
 # ---------------------------------------------------------------------------
 # QNAP-Begleiter (Reiter „QNAP“): Zustand in qnap.json, eigene Logik in
 # qnap_begleiter.py. Greift nicht auf Schlüssel oder profile.json zu (außer
-# lesend: Repository, öffentlicher Schlüssel und Token für den Download).
+# lesend: Repository, Regel, Ausnahmen, öffentlicher Schlüssel und Token für den Download).
 # ---------------------------------------------------------------------------
 def _qnap_laden():
     return json_datei_laden(os.path.join(daten_ordner(), "qnap.json"), MB)
@@ -1655,8 +1781,9 @@ def github_versionen(repo, token):
     """Tags v<x.y.z> eines Repositorys, neueste zuerst."""
     if not _REPO_RE.match(repo or ""):
         raise ValueError("Ungültiges Repository.")
-    d = _gh(f"/repos/{repo}/tags?per_page=100", token)
-    namen = {str(t.get("name") or "") for t in d if isinstance(t, dict)} if isinstance(d, list) else set()
+    d = _gh(f"/repos/{repo}/git/matching-refs/tags/v", token)   # alle Tags „v…“, nicht nur eine Seite
+    namen = {str(t.get("ref") or "").removeprefix("refs/tags/") for t in d if isinstance(t, dict)} \
+        if isinstance(d, list) else set()
     return sorted((n for n in namen if Q._TAG_RE.match(n)), key=lambda n: tuple(int(x) for x in n[1:].split(".")),
                   reverse=True)[:30]
 
@@ -1679,7 +1806,7 @@ def qnap_paket(pr, token, tag, name, ziel):
         raise ValueError(f"Den Tag {tag} gibt es in {repo} nicht.")
     os.makedirs(ziel, mode=0o700, exist_ok=True)
     version = tag[1:]
-    with tempfile.TemporaryDirectory(prefix="qnap-", dir=ziel) as tmp:
+    with tempfile.TemporaryDirectory(prefix="qnap-", dir=ziel, ignore_cleanup_errors=True) as tmp:
         ordner = os.path.join(tmp, "stand")
         os.mkdir(ordner, 0o700)
         with tempfile.TemporaryFile() as archiv:
@@ -1719,10 +1846,12 @@ def qnap_paket(pr, token, tag, name, ziel):
             ordner_namen = sorted({"/".join(r_.split("/")[:i]) for r_ in dateien for i in range(1, r_.count("/") + 1)})
             for rel in [""] + ordner_namen:
                 info = zipfile.ZipInfo(name + "/" + (rel + "/" if rel else ""), date_time=zeit)
+                info.create_system = 3   # Unix - sonst ignoriert unzip die Rechte (Windows setzt 0)
                 info.external_attr = (0o40755 << 16) | 0x10
                 zo.writestr(info, b"")
             for rel in dateien:
                 info = zipfile.ZipInfo(name + "/" + rel, date_time=zeit)
+                info.create_system = 3
                 info.external_attr = (0o100755 if rel in ausfuehrbar else 0o100644) << 16
                 info.compress_type = zipfile.ZIP_DEFLATED
                 zo.writestr(info, regulaer_lesen(os.path.join(ordner, *rel.split("/"))))
@@ -1759,6 +1888,8 @@ def qnap_aktion(name, p):
         antwort = b.abbrechen()
     elif name == "qnap_alt_vergessen":
         antwort = b.alt_vergessen()
+    elif name == "qnap_sperre_aufheben":
+        antwort = b.sperre_aufheben()
     elif name == "qnap_vorbereiten":
         return b.vorbereiten(str(p.get("schritt") or ""))
     elif name == "qnap_ausfuehren":
@@ -1779,6 +1910,10 @@ def qnap_aktion(name, p):
 def aktion(name, p):
     if name.startswith("qnap_"):
         return qnap_aktion(name, p)
+    if name == "ordner_waehlen":   # Fenster kann lange offen sein - ohne Sperre
+        return {"pfad": ordner_waehlen()}
+    if name == "datei_waehlen":
+        return {"pfad": datei_waehlen()}
     with _lock:
         d = profile_laden()
         if name == "zustand":
@@ -1793,8 +1928,11 @@ def aktion(name, p):
             name_ = str(p.get("name") or "").strip()[:60]
             if not name_:
                 raise ValueError("Bitte einen Namen für das Profil angeben.")
-            werte = {"name": name_, "regel": regel, "repo": repo, "zweig": zweig,
-                     "ausschluss": [m.strip() for m in str(p.get("ausschluss") or "").splitlines() if m.strip()][:50]}
+            ausschluss = [m.strip() for m in str(p.get("ausschluss") or "").splitlines() if m.strip()]
+            if len(ausschluss) > 50:
+                raise ValueError(f"Höchstens 50 Ausnahmen ({len(ausschluss)} eingetragen) - bitte zusammenfassen, "
+                                 "z. B. mit „ordner/*“.")
+            werte = {"name": name_, "regel": regel, "repo": repo, "zweig": zweig, "ausschluss": ausschluss}
             if p.get("id"):
                 _profil(d, p["id"]).update(werte)
             else:
@@ -1821,9 +1959,7 @@ def aktion(name, p):
             privat = Ed25519PrivateKey.generate()
             pem = privat.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                        serialization.BestAvailableEncryption(kw.encode("utf-8")))
-            neu_anlegen(schluessel_pfad(pr), pem, 0o600)
-            pr["oeffentlich"] = oeffentlich_text(privat)
-            profile_speichern(d)
+            _schluessel_ablegen(d, pr, pem, privat)
             return {**_ansicht(d), "meldung": "Schlüssel erzeugt. Bitte die Schlüsseldatei zusätzlich sichern (USB-Stick)."}
         if name == "schluessel_import":
             pr = _profil(d, p.get("id"))
@@ -1835,9 +1971,7 @@ def aktion(name, p):
             privat = _privat_aus_pem(pem, str(p.get("kennwort") or ""))
             if os.path.lexists(schluessel_pfad(pr)):
                 raise ValueError("Das Profil hat schon einen Schlüssel.")
-            neu_anlegen(schluessel_pfad(pr), pem, 0o600)   # exklusiv, folgt keiner Verknüpfung
-            pr["oeffentlich"] = oeffentlich_text(privat)
-            profile_speichern(d)
+            _schluessel_ablegen(d, pr, pem, privat)
             return {**_ansicht(d), "meldung": "Schlüssel übernommen. Die ursprüngliche Datei bleibt, wo sie ist."}
         if name == "token_speichern":
             t = str(p.get("token") or "").strip()
@@ -1871,10 +2005,6 @@ def aktion(name, p):
                 "PRUEFMODUL_SHA256": PRUEFMODUL_SHA256})
             datei = "Prompt_Einbindung_" + (re.sub(r"[^A-Za-z0-9_-]+", "_", str(pr.get("name") or "")).strip("_")[:40] or "Profil") + ".md"
             return {"text": text, "datei": datei}
-        if name == "ordner_waehlen":
-            return {"pfad": ordner_waehlen()}
-        if name == "datei_waehlen":
-            return {"pfad": datei_waehlen()}
         if name == "ordner_oeffnen":
             ordner_oeffnen(daten_ordner() if p.get("was") in ("daten", "qnap") else str(p.get("pfad") or ""))
             return {}
@@ -1884,7 +2014,8 @@ def aktion(name, p):
                 raise ValueError("Kein Profil mit dem Schlüssel des Herausgebers (" + WERKZEUG_SCHLUESSEL[:8] + "…) gefunden.")
             pr = dict(pr)
         else:
-            pr = _profil(d, p.get("id")) if name not in ("update_suchen", "update_einspielen", "werkzeug_bau_starten", "werkzeug_bau_status") else None
+            pr = _profil(d, p.get("id")) if name not in ("update_suchen", "update_einspielen", "werkzeug_bau_starten",
+                                                         "werkzeug_bau_status", "werkzeug_entwurf_info") else None
         token = geheim_lesen(d.get("github_token"))
     if name == "update_suchen":
         version, _rel = werkzeug_neueste()
@@ -1899,10 +2030,16 @@ def aktion(name, p):
         if not token:
             raise ValueError("Zum Starten des Baus wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
         version, stand = werkzeug_bau_starten(token)
-        return {"ok": True, "meldung": f"Tag v{version} auf {stand[:7]} gesetzt. GitHub baut jetzt unter „Actions“ "
+        return {"ok": True, "tag": f"v{version}", "meldung": f"Tag v{version} auf {stand[:7]} gesetzt. GitHub baut jetzt unter „Actions“ "
                                        "(einige Minuten), danach hier „Neuen Entwurf signieren und veröffentlichen“."}
     if name == "werkzeug_bau_status":
         return werkzeug_bau_status(token)
+    if name == "werkzeug_entwurf_info":
+        if not token:
+            raise ValueError("Zum Veröffentlichen wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
+        rel = werkzeug_entwurf(token)
+        neueste, _ = werkzeug_neueste()
+        return {"version": rel["tag_name"].lstrip("v"), "veroeffentlicht": neueste or ""}
     if name == "werkzeug_veroeffentlichen":
         if not token:
             raise ValueError("Zum Veröffentlichen wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
@@ -1921,6 +2058,10 @@ def aktion(name, p):
         else:
             version, anzahl, _ = signieren(ordner, pr, str(p.get("kennwort") or ""))
             bau_text = ""
+        if os.path.isdir(os.path.join(ordner, ".git")):
+            bau_text += (" Hinweis: Das ist ein Git-Arbeitsordner - signiert wurden alle Dateien darin, auch nicht "
+                         "eingecheckte (z. B. Thumbs.db, *.bak). Für genau den Stand des Repositorys „Von GitHub laden, "
+                         "signieren und hochladen“ verwenden.")
         return {"meldung": f"SIGNATUR.json geschrieben: Version {version or '(ohne)'}, {anzahl} Dateien.{bau_text}", "ok": True}
     if name == "pruefen_ordner":
         ordner = str(p.get("ordner") or "").strip().strip('"')
@@ -1932,7 +2073,7 @@ def aktion(name, p):
         if not pr.get("repo"):
             raise ValueError("Im Profil ist kein GitHub-Repository eingetragen.")
         speedrace = pr.get("regel") == "speedrace"
-        with tempfile.TemporaryDirectory(prefix="signier-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="signier-", ignore_cleanup_errors=True) as tmp:
             ordner, stand = github_laden(pr["repo"], pr.get("zweig") or "main", token, tmp)
             if name == "pruefen_github":
                 return {"pruefung": pruefen(ordner, pr.get("oeffentlich") or "", pr.get("regel", "alle"), pr.get("ausschluss")),
@@ -2017,7 +2158,8 @@ class Server:
                     return self._senden(403, "Zugriff verweigert.", "text/plain; charset=utf-8")
                 server.letzter_kontakt = time.monotonic()
                 self._senden(200, SEITE.replace("__TOKEN__", server.token).replace("__VERSION__", VERSION)
-                             .replace("__REPO__", WERKZEUG_REPO),
+                             .replace("__REPO__", WERKZEUG_REPO)
+                             .replace("__AUSGENOMMEN__", html.escape("  ".join(STANDARD_AUSSCHLUSS))),
                              "text/html; charset=utf-8")
 
             def do_POST(self):
@@ -2080,11 +2222,11 @@ class Server:
             self.httpd.shutdown()
 
     def waechter(self):
-        # ohne Konsolenfenster: beenden, wenn die Seite 3 Minuten nichts meldet -
+        # ohne Konsolenfenster: beenden, wenn die Seite 10 Minuten nichts meldet -
         # nie mitten in einer laufenden Aktion
         while True:
             time.sleep(15)
-            if not self.aktiv and time.monotonic() - self.letzter_kontakt > 180:
+            if not self.aktiv and time.monotonic() - self.letzter_kontakt > 600:
                 self.httpd.shutdown()
                 return
 
@@ -2093,6 +2235,8 @@ class Server:
         threading.Thread(target=self.waechter, daemon=True).start()
         if browser:
             threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+        elif sys.stdout:   # --ohne-browser: Adresse ausgeben (exe ohne Konsole hat keine Ausgabe)
+            print(url, flush=True)
         self.httpd.serve_forever()
 
 
@@ -2107,7 +2251,9 @@ def _sicherheit_selbsttest(tmp):
         with zipfile.ZipFile(puffer, "w") as z:
             z.writestr("repo-abc/", "")
             for n in namen:
-                z.writestr("repo-abc/" + n, "x")
+                info = zipfile.ZipInfo("repo-abc/x")
+                info.filename = "repo-abc/" + n   # nachträglich: kein Umwandeln von „\\“ in „/“
+                z.writestr(info, "x")
         puffer.seek(0)
         return puffer
     aussen = os.path.join(tmp, "aussen")
@@ -2192,9 +2338,12 @@ def selbsttest(ausgabe):
         signieren(tmp, pr, "Selbsttest-123", "0.0.1")
         r = pruefen(tmp, pr["oeffentlich"], "alle", pr["ausschluss"])
         dp = ""
-        if os.name == "nt":
-            dp = " dpapi=" + str(geheim_lesen(geheim_speichern("probe")) == "probe")
         fehler = _sicherheit_selbsttest(tmp)
+        if os.name == "nt":
+            dpapi_ok = geheim_lesen(geheim_speichern("probe")) == "probe"
+            dp = " dpapi=" + str(dpapi_ok)
+            if not dpapi_ok:
+                fehler.append("dpapi: Token-Speicher funktioniert nicht")
         ergebnis = "OK" if r["ok"] and not fehler else "FEHLER " + json.dumps({"pruefung": r, "sicherheit": fehler},
                                                                              ensure_ascii=False)
         open(ausgabe, "w", encoding="utf-8").write(ergebnis + dp + " sicherheit=" + ("ok" if not fehler else "fehler") + "\n")
@@ -2263,7 +2412,7 @@ Version __VERSION__ <button class="zweit" id="beenden">Beenden</button></div></h
    <option value="alle">Alle Dateien außer Ausnahmen</option></select></div></div>
   <div class="zeile"><div><label for="b-repo">GitHub-Repository (Besitzer/Name)</label><input id="b-repo" placeholder="Besitzer/Name"></div>
   <div><label for="b-zweig">Zweig</label><input id="b-zweig" value="main"></div></div>
-  <div id="b-aus-box"><label for="b-ausschluss">Ausnahmen (eine je Zeile, z. B. <span class="mono">*.log</span> oder <span class="mono">daten/*</span>); .git, __pycache__ und SIGNATUR.json sind immer ausgenommen</label>
+  <div id="b-aus-box"><label for="b-ausschluss">Ausnahmen (eine je Zeile, z. B. <span class="mono">*.log</span> oder <span class="mono">daten/*</span>; Groß-/Kleinschreibung zählt); immer ausgenommen: <span class="mono">__AUSGENOMMEN__</span></label>
   <textarea id="b-ausschluss"></textarea></div>
   <div class="zeile" style="margin-top:12px"><button id="b-speichern">Speichern</button><button class="zweit" id="b-abbrechen">Abbrechen</button></div>
   <div id="b-schluessel" class="versteckt" style="margin-top:16px;border-top:1px solid var(--rand);padding-top:12px">
@@ -2332,7 +2481,8 @@ Version __VERSION__ <button class="zweit" id="beenden">Beenden</button></div></h
    Nur anleiten (nichts ausführen – Befehle nur lesen und kopieren)</label>
   <div class="zeile" style="margin-top:10px"><button class="zweit" id="q-http">Dashboard-Adresse prüfen</button>
    <button class="zweit" id="q-protokoll">Ordner mit Protokoll öffnen</button>
-   <button class="zweit versteckt" id="q-vergessen">Gemerkten alten Ordner vergessen</button></div>
+   <button class="zweit versteckt" id="q-vergessen">Gemerkten alten Ordner vergessen</button>
+   <button class="zweit versteckt" id="q-sperre">Bau-Sperre aufheben</button></div>
   <div class="hinweis" id="q-info" style="margin-top:8px"></div>
   <div class="status" id="q-status"></div></div>
  <div id="q-schritte"></div>
@@ -2348,7 +2498,13 @@ const TOKEN = "__TOKEN__"; let Z = {profile: []};
 const $ = id => document.getElementById(id);
 const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 async function api(name, daten) {
-  const r = await fetch("/api/" + name, {method: "POST", headers: {"X-Token": TOKEN, "Content-Type": "application/json"}, body: JSON.stringify(daten || {})});
+  let r;
+  try {
+    r = await fetch("/api/" + name, {method: "POST", headers: {"X-Token": TOKEN, "Content-Type": "application/json"}, body: JSON.stringify(daten || {})});
+  } catch (e) {
+    const f = new Error("Das Werkzeug antwortet nicht mehr (beendet oder nach längerer Pause geschlossen) – bitte neu starten.");
+    f.netz = true; throw f;
+  }
   let d = {}; try { d = await r.json(); } catch (e) {}
   if (!r.ok) throw new Error(d.fehler || ("Fehler " + r.status));
   return d;
@@ -2364,7 +2520,8 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
 });
 function zeichnen() {
   const opt = Z.profile.map(p => `<option value="${esc(p.id)}">${esc(p.name)}${p.hat_schluessel ? "" : " (ohne Schlüssel)"}</option>`).join("");
-  ["s-profil", "p-profil"].forEach(id => { const alt = $(id).value; $(id).innerHTML = opt || '<option value="">– erst ein Profil anlegen –</option>'; if (alt) $(id).value = alt; });
+  ["s-profil", "p-profil"].forEach(id => { const alt = $(id).value; $(id).innerHTML = opt || '<option value="">– erst ein Profil anlegen –</option>';
+    if (alt && Z.profile.some(p => p.id === alt)) $(id).value = alt; });
   $("profilliste").innerHTML = Z.profile.length ? Z.profile.map(p => `<div class="profil"><b>${esc(p.name)}</b>
     <span class="marke">${p.regel === "speedrace" ? "Speedrace" : "alle Dateien"}</span>
     <span class="marke ${p.hat_schluessel ? "gut" : "schlecht"}">${p.hat_schluessel ? "Schlüssel ✓" : "kein Schlüssel"}</span>
@@ -2374,7 +2531,8 @@ function zeichnen() {
   document.querySelectorAll("[data-loesch]").forEach(b => b.onclick = async () => {
     const p = Z.profile.find(x => x.id === b.dataset.loesch);
     if (!confirm(`Profil „${p.name}“ löschen? Die Schlüsseldatei wird nicht gelöscht, nur umbenannt (…geloescht-Datum).`)) return;
-    try { Z = await api("profil_loeschen", {id: p.id}); zeichnen(); $("bearbeiten").classList.add("versteckt"); } catch (e) { alert(e.message); }
+    try { Z = await api("profil_loeschen", {id: p.id}); zeichnen(); if ($("b-id").value === p.id) $("bearbeiten").classList.add("versteckt"); }
+    catch (e) { alert(e.message); }
   });
   $("datenpfad").textContent = Z.daten || "";
   const ART = {dpapi: "mit Windows-DPAPI verschlüsselt gespeichert", schluesselbund: "im Schlüsselbund des Betriebssystems gespeichert",
@@ -2412,7 +2570,8 @@ function bearbeiten(p, vorlage) {
   $("bearbeiten").scrollIntoView({behavior: "smooth"});
 }
 let promptDatei = "Prompt_Einbindung.md";
-$("b-prompt").onclick = e => mit("b-status", e.target, "Erzeuge …", async () => {
+$("b-prompt").onclick = e => mit("b-status", e.target, "Speichere das Profil und erzeuge …", async () => {
+  Z = await api("profil_speichern", profilFormular()); zeichnen();   // Prompt passt immer zum Formular
   const d = await api("einbindung_prompt", {id: $("b-id").value});
   $("b-prompt-text").value = d.text; promptDatei = d.datei;
   ["b-prompt-text", "b-prompt-kopieren", "b-prompt-speichern"].forEach(id => $(id).classList.remove("versteckt"));
@@ -2428,10 +2587,13 @@ $("b-regel").onchange = () => $("b-aus-box").classList.toggle("versteckt", $("b-
 $("neu-speedrace").onclick = () => bearbeiten(null, "speedrace");
 $("neu-allgemein").onclick = () => bearbeiten(null, "alle");
 $("b-abbrechen").onclick = () => $("bearbeiten").classList.add("versteckt");
+function profilFormular() {
+  return {id: $("b-id").value, name: $("b-name").value, regel: $("b-regel").value,
+    repo: $("b-repo").value, zweig: $("b-zweig").value, ausschluss: $("b-ausschluss").value};
+}
 $("b-speichern").onclick = e => mit("b-status", e.target, "Speichern …", async () => {
   const neu = !$("b-id").value;
-  Z = await api("profil_speichern", {id: $("b-id").value, name: $("b-name").value, regel: $("b-regel").value,
-    repo: $("b-repo").value, zweig: $("b-zweig").value, ausschluss: $("b-ausschluss").value});
+  Z = await api("profil_speichern", profilFormular());
   zeichnen();
   const p = neu ? Z.profile[Z.profile.length - 1] : Z.profile.find(x => x.id === $("b-id").value);
   bearbeiten(p); status("b-status", "ok", "✅ Gespeichert." + (p.hat_schluessel ? "" : " Jetzt einen Schlüssel erzeugen oder übernehmen."));
@@ -2512,7 +2674,7 @@ $("g-alt-weg").onclick = e => {
     Z = await api("token_speichern", {token: "", entfernen: true}); zeichnen(); status("g-status", "ok", "✅ " + esc(Z.meldung)); });
 };
 $("beenden").onclick = async () => {
-  try { await api("beenden"); } catch (e) { if (!(e instanceof TypeError)) return alert(e.message); }   // TypeError: Server schon weg
+  try { await api("beenden"); } catch (e) { if (!e.netz) return alert(e.message); }   // netz: Server schon weg
   document.body.innerHTML = '<main><div class="karte"><h2>Beendet</h2>Das Fenster kann geschlossen werden.</div></main>'; };
 setInterval(() => api("ping").catch(() => {}), 20000);
 function updateZeigen(d) {
@@ -2531,8 +2693,9 @@ $("w-suchen").onclick = e => mit("w-status", e.target, "Frage GitHub …", async
   const d = await api("update_suchen"); updateZeigen(d);
   status("w-status", "ok", d.neuer ? `✅ Version ${esc(d.version)} ist verfügbar – oben auf „Update auf ${esc(d.version)}“ klicken.`
     : `✅ Aktuell (Version ${esc(d.aktuell)}${d.version ? ", neueste veröffentlichte " + esc(d.version) : ", noch nichts veröffentlicht"}).`); });
-let bauTimer = null, bauBis = 0;
+let bauTimer = null, bauBis = 0, bauErwartet = "";
 function bauZeigen(d) {
+  if (bauErwartet && d.tag !== bauErwartet) return status("w-status", "laeuft", `⏳ Warte, bis GitHub den Bau ${esc(bauErwartet)} anlegt …`);
   const link = d.url ? ` <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Lauf öffnen</a>` : "";
   $("w-veroeff").classList.toggle("hervor", d.zustand === "fertig" && d.entwurf);
   if (d.zustand === "keiner") return status("w-status", "laeuft", "Noch kein Bau gefunden.");
@@ -2544,7 +2707,8 @@ function bauZeigen(d) {
 }
 async function bauAbfragen() {
   try { const d = await api("werkzeug_bau_status"); bauZeigen(d);
-    if (["fertig", "fehlgeschlagen"].includes(d.zustand) || Date.now() > bauBis) { clearInterval(bauTimer); bauTimer = null; }
+    const passt = !bauErwartet || d.tag === bauErwartet;
+    if ((passt && ["fertig", "fehlgeschlagen"].includes(d.zustand)) || Date.now() > bauBis) { clearInterval(bauTimer); bauTimer = null; bauErwartet = ""; }
   } catch (e) { status("w-status", "fehler", "❌ " + esc(e.message)); clearInterval(bauTimer); bauTimer = null; }
 }
 function bauBeobachten() { clearInterval(bauTimer); bauBis = Date.now() + 40 * 60 * 1000; bauTimer = setInterval(bauAbfragen, 20000); }
@@ -2552,19 +2716,22 @@ $("w-bauen").onclick = e => {
   if (!confirm("Tag v<VERSION> auf den neuesten Stand von main setzen? Die Version kommt aus signier_werkzeug.py auf main. GitHub baut daraufhin den Entwurf.")) return;
   mit("w-status", e.target, "Setze Tag …", async () => {
     const d = await api("werkzeug_bau_starten"); status("w-status", "ok", "✅ " + esc(d.meldung) + " Der Fortschritt wird hier angezeigt.");
-    bauBeobachten(); setTimeout(bauAbfragen, 8000); });
+    bauErwartet = d.tag || ""; bauBeobachten(); setTimeout(bauAbfragen, 8000); });
 };
 $("w-baustatus").onclick = e => mit("w-status", e.target, "Frage GitHub …", async () => {
   const d = await api("werkzeug_bau_status"); bauZeigen(d); if (["wartet", "laeuft"].includes(d.zustand)) bauBeobachten(); });
 $("w-veroeff").onclick = async e => {
-  const kw = await kennwort("Neuesten Entwurf des Signier-Werkzeugs von GitHub laden, signieren und veröffentlichen (Schlüssel des Herausgebers).");
+  let info;
+  try { info = await api("werkzeug_entwurf_info"); } catch (err) { return status("w-status", "fehler", "❌ " + esc(err.message)); }
+  const kw = await kennwort(`Entwurf ${info.version} des Signier-Werkzeugs von GitHub laden, signieren und veröffentlichen ` +
+    `(Schlüssel des Herausgebers). Zurzeit veröffentlicht: ${info.veroeffentlicht || "noch nichts"}.`);
   if (kw === null) return;
   mit("w-status", e.target, "Lade Entwurf, signiere und veröffentliche …", async () => {
     const d = await api("werkzeug_veroeffentlichen", {kennwort: kw}); $("w-veroeff").classList.remove("hervor"); status("w-status", "ok", "✅ " + esc(d.meldung)); });
 };
 // ---- QNAP-Begleiter ----------------------------------------------------
 let QZ = null;
-const Q_STATUS = {offen: "offen", laeuft: "läuft – Ergebnis melden", erledigt: "erledigt", fehler: "Fehler", uebersprungen: "übersprungen"};
+const Q_STATUS = {offen: "offen", laeuft: "läuft – Ergebnis melden", laedt: "lädt und prüft …", erledigt: "erledigt", fehler: "Fehler", uebersprungen: "übersprungen"};
 function qSetzen(d) { QZ = d; qZeichnen(); }
 function qProfilZeigen() {
   const p = QZ.profil || {};
@@ -2583,7 +2750,10 @@ function qZeichnen() {
   ["q-host", "q-port", "q-benutzer", "q-ordner", "q-adresse", "q-bin", "q-compose", "q-quelle", "q-speichern"].forEach(id => $(id).disabled = laeuft);
   $("q-beginnen").disabled = laeuft || !QZ.profil; $("q-abbrechen").disabled = !laeuft;
   $("q-vergessen").classList.toggle("versteckt", !QZ.alt || laeuft);
+  $("q-sperre").classList.toggle("versteckt", !QZ.bau_gesperrt || laeuft);
   $("q-info").innerHTML = (QZ.alt ? `Beiseitegelegter alter Ordner: <span class="mono">${esc(QZ.alt)}</span> (Rückweg möglich). ` : "")
+    + (QZ.zips && QZ.zips.length ? `Hochgeladene ZIP: <span class="mono">${QZ.zips.map(esc).join(", ")}</span> (löscht „Aufräumen“). ` : "")
+    + (QZ.bau_gesperrt ? "⚠️ Neubau gesperrt (letzte Bau-Prüfung: Ergebnis 2). " : "")
     + `Protokoll: <span class="mono">${esc(QZ.protokoll)}</span>`;
   const idx = laeuft ? QZ.lauf.index : -1;
   $("q-schritte").innerHTML = QZ.schritte.map(s => {
@@ -2685,7 +2855,12 @@ function qMelden(s, ergebnis, knopf, mehr) {
     const n = $("qs-" + d.lauf.index); if (n) n.scrollIntoView({behavior: "smooth", block: "center"});
   });
 }
-async function qLaden() { try { const a = $("q-ablauf").value; qSetzen(await api("qnap_zustand", a ? {ablauf: a} : {})); qProfilZeigen(); } catch (e) { status("q-status", "fehler", "❌ " + esc(e.message)); } }
+let qFormGeladen = false;   // Eingaben im Profilformular nicht beim Reiter-/Ablaufwechsel überschreiben
+async function qLaden() {
+  try { const a = $("q-ablauf").value; qSetzen(await api("qnap_zustand", a ? {ablauf: a} : {}));
+    if (!qFormGeladen) { qProfilZeigen(); qFormGeladen = true; } }
+  catch (e) { status("q-status", "fehler", "❌ " + esc(e.message)); }
+}
 $("q-ablauf").onchange = qLaden;
 $("q-nur").onchange = qZeichnen;
 $("q-speichern").onclick = e => mit("q-pstatus", e.target, "Speichere …", async () => {
@@ -2695,14 +2870,21 @@ $("q-speichern").onclick = e => mit("q-pstatus", e.target, "Speichere …", asyn
   qProfilZeigen(); status("q-pstatus", "ok", "✅ Gespeichert."); });
 $("q-beginnen").onclick = e => mit("q-status", e.target, "Beginne …", async () => {
   qSetzen(await api("qnap_beginnen", {ablauf: $("q-ablauf").value}));
-  status("q-status", "ok", "✅ Ablauf begonnen – Schritt 1 ist freigegeben."); });
+  status("q-status", "ok", "✅ Ablauf begonnen – Schritt 1 ist freigegeben."); }).then(qZeichnen);
 $("q-abbrechen").onclick = e => {
   if (!confirm("Ablauf abbrechen? Bereits ausgeführte Schritte werden nicht rückgängig gemacht (ein beiseitegelegter Ordner bleibt gemerkt).")) return;
-  mit("q-status", e.target, "Breche ab …", async () => { qSetzen(await api("qnap_abbrechen")); status("q-status", "ok", "Abgebrochen."); });
+  mit("q-status", e.target, "Breche ab …", async () => { qSetzen(await api("qnap_abbrechen")); status("q-status", "ok", "Abgebrochen."); })
+    .then(qZeichnen);
+};
+$("q-sperre").onclick = e => {
+  if (!confirm("Bau-Sperre aufheben? Nur, wenn die Bau-Dateien inzwischen aus der signierten Version neu geholt sind. Wird protokolliert.")) return;
+  mit("q-status", e.target, "…", async () => { qSetzen(await api("qnap_sperre_aufheben")); status("q-status", "ok", "Sperre aufgehoben."); })
+    .then(qZeichnen);
 };
 $("q-vergessen").onclick = e => {
   if (!confirm(`Den gemerkten Ordner „${QZ.alt}“ vergessen? Nur, wenn es ihn auf der QNAP sicher nicht (mehr) gibt – sonst geht der Rückweg verloren.`)) return;
-  mit("q-status", e.target, "…", async () => { qSetzen(await api("qnap_alt_vergessen")); status("q-status", "ok", "Vergessen."); });
+  mit("q-status", e.target, "…", async () => { qSetzen(await api("qnap_alt_vergessen")); status("q-status", "ok", "Vergessen."); })
+    .then(qZeichnen);
 };
 $("q-http").onclick = e => mit("q-status", e.target, "Rufe die Dashboard-Adresse auf …", async () => {
   const d = await api("qnap_http"); status("q-status", d.ok ? "ok" : "fehler", (d.ok ? "✅ " : "❌ ") + esc(d.text)); });
@@ -2714,12 +2896,55 @@ api("zustand").then(d => { Z = d; zeichnen(); if (!Z.profile.length) document.qu
 </script></body></html>"""
 
 
+_INSTANZ = {}
+
+
+def _instanz_sperren(warten=10):
+    """Nur eine laufende Instanz je Windows-Benutzer: zwei Instanzen würden
+    profile.json bzw. qnap.json gegenseitig überschreiben. -> True, wenn diese
+    Instanz die Sperre hat. (Beim Neustart nach einem Update wartet die neue
+    kurz, bis die alte beendet ist.)"""
+    pfad = os.path.join(daten_ordner(), "instanz.lock")
+    fd = os.open(pfad, os.O_RDWR | os.O_CREAT | _O_BINAER | _O_CLOEXEC, 0o600)
+    ende = time.monotonic() + warten
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _INSTANZ["fd"] = fd   # offen lassen, solange das Programm läuft
+            return True
+        except OSError:
+            if time.monotonic() > ende:
+                os.close(fd)
+                return False
+            time.sleep(0.5)
+
+
 def main():
     if len(sys.argv) > 2 and sys.argv[1] == "--selbsttest":
         selbsttest(sys.argv[2])
         return
+    adresse = os.path.join(daten_ordner(), "adresse.txt")
+    if not _instanz_sperren():
+        try:   # die laufende Instanz im Browser zeigen
+            url = regulaer_lesen(adresse, 4096).decode("ascii").strip()
+            if re.fullmatch(r"http://127\.0\.0\.1:\d{1,5}/\?t=[A-Za-z0-9_-]{20,64}", url):
+                webbrowser.open(url)
+        except (OSError, ValueError, UnicodeDecodeError):
+            pass
+        return
     threading.Thread(target=_alte_exe_entfernen, daemon=True).start()
-    Server().starten(browser="--ohne-browser" not in sys.argv)
+    server = Server()
+    try:
+        atomar_schreiben(daten_ordner(), "adresse.txt",
+                         f"http://127.0.0.1:{server.port}/?t={server.token}\n".encode("ascii"), 0o600)
+    except (OSError, ValueError):
+        pass
+    server.starten(browser="--ohne-browser" not in sys.argv)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from unittest import mock
 
 HIER = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HIER))
+sys.path.insert(0, HIER)
 import signier_werkzeug as W  # noqa: E402
 
 KENNWORT = "Test-Kennwort-123"
@@ -300,3 +301,323 @@ class QnapPaketPycTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Zweite Runde: M7–M14 und N-Punkte
+# ---------------------------------------------------------------------------
+import ssl  # noqa: E402
+import types  # noqa: E402
+import unicodedata  # noqa: E402
+import urllib.error  # noqa: E402
+
+import qnap_begleiter as Q  # noqa: E402
+import test_qnap  # noqa: E402
+
+
+class QnapZweiteRunde(test_qnap.Ablauf):
+    def bis_hochladen(self):
+        self.b.beginnen("installieren")
+        self.schritt("vorbereitung")
+        self.schritt("verbindung", root="nein")
+        self.schritt("werkzeuge", compose="plugin")
+        self.schritt("version", tag="v1.8.5")
+
+    def test_eigene_zip_wird_gemerkt_und_nur_sie_geloescht(self):
+        """M7"""
+        self.bis_hochladen()
+        zn = self.b.ansicht()["lauf"]["paket"]["zipname"]
+        self.assertRegex(zn, r"^programmordner\.signier-\d{8}-\d{4}\.zip$")
+        self.schritt("hochladen")
+        self.assertEqual(self.b.ansicht()["zips"], [zn])
+        self.b.abbrechen()
+        self.assertEqual(self.b.ansicht()["zips"], [zn])   # bleibt auch nach Abbruch gemerkt
+        self.b.beginnen("aufraeumen")
+        self.schritt("verbindung", root="ja")
+        self.b.rueckmelden("alt_loeschen", "uebersprungen", {})
+        v = self.b.vorbereiten("zip_loeschen")
+        self.assertEqual(v["befehl"], f"cd '/share/BEISPIEL' && rm -- '{zn}'; ls -la")
+        self.b.ausfuehren("zip_loeschen", v["marke"], {"bestaetigt": True})
+        self.b.rueckmelden("zip_loeschen", "geklappt", {})
+        self.assertEqual(self.b.ansicht()["zips"], [])
+        self.assertRaises(ValueError, Q.SCHRITTE["zip_loeschen"]["befehl"], test_qnap.profil(root_wert=True), {}, {}, False)
+
+    def test_profil_fest_solange_etwas_gemerkt_ist(self):
+        """M8"""
+        self.bis_hochladen()
+        self.schritt("hochladen")
+        self.b.abbrechen()
+        for aenderung in ({"host": "198.51.100.7"}, {"programmordner": "/share/ANDERS/programmordner"}):
+            with self.subTest(aenderung=aenderung):
+                self.assertRaisesRegex(ValueError, "bleiben fest", self.b.profil_speichern,
+                                       {**test_qnap.PROFIL, **aenderung}, ("quelle01",))
+        self.b.profil_speichern({**test_qnap.PROFIL, "benutzer": "anderer-benutzer"}, ("quelle01",))   # erlaubt
+
+    def test_ueberspringen_nach_ausfuehren_abgelehnt(self):
+        """N9"""
+        self.b.beginnen("aufraeumen")
+        self.schritt("verbindung", root="ja")
+        z = self.zustand
+        z["alt"] = "programmordner.alt-20260101-1200"
+        self._speichern(z)
+        v = self.b.vorbereiten("alt_loeschen")
+        self.b.ausfuehren("alt_loeschen", v["marke"], {"bestaetigt": True, "name": "programmordner.alt-20260101-1200"})
+        self.assertRaisesRegex(ValueError, "schon ausgeführt", self.b.rueckmelden, "alt_loeschen", "uebersprungen", {})
+
+    def test_bau_sperre_ueber_abbruch_hinweg(self):
+        """N10"""
+        self.b.beginnen("neubau")
+        for sid, extra in (("vorbereitung", {}), ("verbindung", {"root": "ja"}), ("werkzeuge", {"compose": "plugin"}),
+                           ("ordner", {}), ("zustand", {}), ("bau_vorpruefung", {"treffer": "mehr"})):
+            self.schritt(sid, **extra)
+        self.schritt("bau_pruefen", "fehler", bauergebnis="2")
+        self.b.abbrechen()
+        self.assertTrue(self.b.ansicht()["bau_gesperrt"])
+        self.b.beginnen("neubau")
+        for sid, extra in (("vorbereitung", {}), ("verbindung", {"root": "ja"}), ("werkzeuge", {"compose": "plugin"}),
+                           ("ordner", {}), ("zustand", {})):
+            self.schritt(sid, **extra)
+        v = self.b.vorbereiten("bau_vorpruefung")
+        self.b.ausfuehren("bau_vorpruefung", v["marke"], {"bestaetigt": True})
+        self.assertRaisesRegex(ValueError, "Ergebnis 2", self.b.rueckmelden, "bau_vorpruefung", "geklappt",
+                               {"treffer": "0", "ohne_pruefung": True})
+        self.b.abbrechen()
+        self.b.sperre_aufheben()
+        self.assertFalse(self.b.ansicht()["bau_gesperrt"])
+        self.assertIn("Bau-Sperre vom Benutzer aufgehoben", self.protokoll())
+
+    def test_laden_ohne_sperre(self):
+        """N13: während des Downloads bleibt der Begleiter bedienbar."""
+        self.b.beginnen("installieren")
+        self.schritt("vorbereitung")
+        self.schritt("verbindung", root="ja")
+        self.schritt("werkzeuge", compose="plugin")
+        v = self.b.vorbereiten("version")
+        fertig = []
+
+        def paket(pr, tag, name):
+            t = threading.Thread(target=lambda: fertig.append(self.b.abbrechen()))
+            t.start()
+            t.join(5)
+            return self.paket(pr, tag, name)
+        with self.assertRaisesRegex(ValueError, "abgebrochen"):
+            self.b.ausfuehren("version", v["marke"], {"bestaetigt": True, "tag": "v1.8.5"}, paket)
+        self.assertEqual(len(fertig), 1)   # Abbrechen lief während des Ladens durch
+
+    def test_geaenderter_ablauf_nach_update(self):
+        """N14"""
+        self.b.beginnen("neubau")
+        z = self.zustand
+        z["lauf"]["schritte"] = ["vorbereitung", "verbindung", "bauen"]
+        self._speichern(z)
+        self.assertRaisesRegex(ValueError, "geändert", self.b.vorbereiten, "vorbereitung")
+
+
+class QnapHttpZertifikat(unittest.TestCase):
+    def test_zertifikatsfehler(self):
+        """N12"""
+        oeffner = mock.Mock()
+        oeffner.open.side_effect = urllib.error.URLError(ssl.SSLCertVerificationError("selbst signiert"))
+        with mock.patch.object(Q.urllib.request, "build_opener", return_value=oeffner):
+            self.assertIn("Zertifikat", Q.http_pruefen("https://192.0.2.10:8443")["text"])
+
+
+class WerkzeugZweiteRunde(Basis):
+    def test_unvollstaendiger_download(self):
+        """N1"""
+        antwort = types.SimpleNamespace(headers={"Content-Length": "100"}, read=mock.Mock(side_effect=[b"x" * 10, b""]))
+        self.assertRaisesRegex(ValueError, "unvollständig", W._lesen, antwort, 1000, None)
+
+    def test_aelterer_entwurf_wird_nicht_veroeffentlicht(self):
+        """N4"""
+        with mock.patch.object(W, "privat_laden", return_value=mock.Mock()), \
+                mock.patch.object(W, "oeffentlich_text", return_value=W.WERKZEUG_SCHLUESSEL), \
+                mock.patch.object(W, "werkzeug_entwurf", return_value={"tag_name": "v1.2.7"}), \
+                mock.patch.object(W, "werkzeug_neueste", return_value=("1.2.8", {})), \
+                mock.patch.object(W, "_herunterladen") as laden:
+            self.assertRaisesRegex(ValueError, "nicht neuer", W.werkzeug_veroeffentlichen, {"id": "x" * 8}, "k", "t")
+            laden.assert_not_called()
+
+    def test_alle_tags(self):
+        """N16"""
+        refs = [{"ref": f"refs/tags/v1.{i}.0"} for i in range(150)] + [{"ref": "refs/tags/vkaputt"}]
+        with mock.patch.object(W, "_gh", return_value=refs) as gh:
+            v = W.github_versionen("Besitzer/beispiel", "t")
+        self.assertIn("matching-refs/tags/v", gh.call_args[0][0])
+        self.assertEqual(v[0], "v1.149.0")
+
+    def test_signatur_zu_gross(self):
+        """M13"""
+        w = os.path.join(self.tmp, "gross")
+        self.schreiben(w, "a.txt", b"1")
+        pr = self.profil()
+        with mock.patch.object(W, "MAX_SIGNATUR_BYTES", 50):
+            self.assertRaisesRegex(ValueError, "größer", W.signieren, w, pr, KENNWORT, "1.0.0")
+        self.assertFalse(os.path.exists(os.path.join(w, "SIGNATUR.json")))
+
+    def test_update_doppelter_fehler_behaelt_neue_exe(self):
+        """M14"""
+        d = os.path.join(self.tmp, "programm")
+        os.makedirs(d)
+        exe = os.path.join(d, "Signier-Werkzeug.exe")
+        with open(exe, "wb") as f:
+            f.write(b"alt")
+        echt = os.replace
+
+        def replace(a, b):
+            if b == exe:
+                raise PermissionError("gesperrt")
+            return echt(a, b)
+        neu = b"MZ" + b"\0" * 100
+        with mock.patch.object(W, "_laufende_exe", return_value=exe), \
+                mock.patch.object(W, "werkzeug_neueste", return_value=("99.0.0", {"assets": [
+                    {"name": W.EXE_NAME, "browser_download_url": "u1"}, {"name": W.SIGNATUR_DATEI, "browser_download_url": "u2"}]})), \
+                mock.patch.object(W, "_herunterladen", side_effect=[neu, b"{}"]), \
+                mock.patch.object(W, "_exe_plausibel"), mock.patch.object(W, "werkzeug_signatur_pruefen"), \
+                mock.patch.object(W.os, "replace", side_effect=replace):
+            with self.assertRaisesRegex(ValueError, "umbenennen"):
+                W.werkzeug_update()
+        reste = os.listdir(d)
+        self.assertIn("Signier-Werkzeug.exe.alt", reste)
+        self.assertTrue(any(open(os.path.join(d, n), "rb").read() == neu for n in reste))   # neue exe nicht gelöscht
+
+    def test_mehr_als_50_ausnahmen(self):
+        """N26"""
+        self.profil()
+        self.assertRaisesRegex(ValueError, "50", W.aktion, "profil_speichern",
+                               {"name": "X", "regel": "alle", "ausschluss": "\n".join(f"m{i}/*" for i in range(51))})
+
+    def test_schluessel_wieder_weg_wenn_profil_nicht_gespeichert(self):
+        """N32"""
+        W.profile_speichern({"profile": [{"id": "abcdef0123456789", "name": "X", "regel": "alle", "oeffentlich": ""}]})
+        with mock.patch.object(W, "profile_speichern", side_effect=PermissionError("gesperrt")):
+            self.assertRaises(PermissionError, W.aktion, "schluessel_neu", {"id": "abcdef0123456789", "kennwort": KENNWORT})
+        self.assertFalse(os.path.exists(W.schluessel_pfad({"id": "abcdef0123456789"})))
+
+    def test_bau_dateiliste_wie_os_walk(self):
+        """N35/N39"""
+        w = os.path.join(self.tmp, "bau")
+        self.schreiben(w, "tools/__pycache__", b"eine Datei, kein Ordner")   # Dashboard hasht sie
+        self.schreiben(w, "tools/a.sh", b"x")
+        self.schreiben(w, "dockerfile", b"klein geschrieben")               # nicht „Dockerfile“
+        ist, unz = W.bau_dateiliste(w)
+        self.assertEqual(sorted(ist), ["tools/__pycache__", "tools/a.sh"])
+        self.assertEqual(unz, [])
+        self.assertTrue(W.bau_bereich("tools/__pycache__"))
+        self.assertFalse(W.bau_bereich("tools/__pycache__/x.cpython-314.pyc"))
+
+    def test_tiefes_json_in_signaturen(self):
+        """N36"""
+        w = os.path.join(self.tmp, "tief")
+        self.schreiben(w, "SIGNATUR.json", b"[" * 100000)
+        self.schreiben(w, "SIGNATUR-BAU.json", b"[" * 100000)
+        self.assertFalse(W.pruefen(w, "x" * 44)["ok"])
+        self.assertEqual(W.bau_pruefen(w, "x" * 44)["stufe"], "fehler")
+
+    def test_schluesselbund_kette(self):
+        """N40"""
+        class Sicher:
+            priority = 5
+
+        class PlaintextKeyring:
+            priority = 1
+
+        class ChainerBackend:
+            priority = 10
+            backends = [PlaintextKeyring(), Sicher()]
+        fake = mock.MagicMock()
+        fake.get_keyring.return_value = ChainerBackend()
+        with mock.patch.dict(sys.modules, {"keyring": fake}), mock.patch.object(W.os, "name", "posix"):
+            self.assertIsInstance(W._keyring(), Sicher)
+            ChainerBackend.backends = [PlaintextKeyring()]
+            self.assertIsNone(W._keyring())
+
+    def test_nfc_und_nfd(self):
+        """N42"""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("signatur_pruefen", os.path.join(os.path.dirname(HIER), "Pruefmodul",
+                                                                                      "signatur_pruefen.py"))
+        P = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(P)
+        w = os.path.join(self.tmp, "nfc")
+        name = unicodedata.normalize("NFC", "Größe.txt")
+        self.schreiben(w, name, b"1")
+        pr = self.profil()
+        W.signieren(w, pr, KENNWORT, "1.0.0")
+        sig = json.loads(open(os.path.join(w, "SIGNATUR.json"), encoding="utf-8").read())
+        self.assertIn(name, sig["dateien"])
+        # Prüfer, dessen Dateisystem NFD liefert (macOS): gleiches Ergebnis in Werkzeug und Prüfmodul
+        ist = {unicodedata.normalize("NFD", n): h for n, h in W.dateiliste(w, "alle").items()}
+        self.assertNotEqual(list(ist), [name])
+        with mock.patch.object(W, "dateiliste", return_value=ist):
+            self.assertTrue(W.pruefen(w, pr["oeffentlich"])["ok"])
+        with mock.patch.object(P, "_dateiliste", return_value=ist):
+            self.assertEqual(P.pruefen(w, pr["oeffentlich"]), "1.0.0")
+
+    def test_reparse_points(self):
+        """N43: nur Symlinks/Junctions (Name-Surrogates) sind Verknüpfungen."""
+        import stat as st
+        datei = types.SimpleNamespace(st_mode=st.S_IFREG | 0o644, st_file_attributes=0x400, st_reparse_tag=0)
+        self.assertEqual(W._art(datei), "datei")   # z. B. OneDrive-Platzhalter, von Windows aufgelöst
+        junction = types.SimpleNamespace(st_mode=st.S_IFDIR | 0o755, st_file_attributes=0x400, st_reparse_tag=0xA0000003)
+        self.assertEqual(W._art(junction), "verknuepfung")
+        alt = types.SimpleNamespace(st_mode=st.S_IFDIR | 0o755, st_file_attributes=0x400)   # ohne st_reparse_tag
+        self.assertEqual(W._art(alt), "verknuepfung")
+
+    def test_git_arbeitsordner_hinweis(self):
+        """N44"""
+        pr = self.profil()
+        w = os.path.join(self.tmp, "git")
+        self.schreiben(w, "a.txt", b"1")
+        self.schreiben(w, ".git/HEAD", b"ref")
+        d = W.aktion("signieren_ordner", {"id": pr["id"], "kennwort": KENNWORT, "ordner": w})
+        self.assertIn("Git-Arbeitsordner", d["meldung"])
+
+    def test_feste_ausnahmen_in_der_seite(self):
+        """N27"""
+        self.assertIn("__AUSGENOMMEN__", W.SEITE)
+        self.assertNotIn("__AUSGENOMMEN__", W.SEITE.replace("__AUSGENOMMEN__", "x"))
+
+    def test_dialog_ohne_sperre(self):
+        """M11: das Auswahlfenster wartet nicht auf die globale Sperre."""
+        gesperrt, frei = threading.Event(), threading.Event()
+
+        def halten():
+            with W._lock:
+                gesperrt.set()
+                frei.wait(5)
+        t = threading.Thread(target=halten)
+        t.start()
+        gesperrt.wait(5)
+        try:
+            with mock.patch.object(W, "ordner_waehlen", return_value="C:\\\\Ordner"):
+                self.assertEqual(W.aktion("ordner_waehlen", {}), {"pfad": "C:\\\\Ordner"})
+        finally:
+            frei.set()
+            t.join(5)
+
+
+class ReservierteNamenTests(unittest.TestCase):
+    def test_wie_ntpath(self):
+        """N3"""
+        for name in ("NUL.tar.gz", "con.a.b", "nul .txt", "AUX", "com1.txt", "lpt¹.log"):
+            with self.subTest(name=name):
+                self.assertRaises(ValueError, W.zip_pfad_teile, "ordner/" + name)
+        for name in ("console.txt", "nullable.py", "auxiliar.md", "com10.txt"):
+            with self.subTest(name=name):
+                W.zip_pfad_teile("ordner/" + name)
+
+
+class InstanzTests(Basis):
+    def test_nur_eine_instanz(self):
+        """N25: eine zweite Instanz bekommt die Sperre nicht (anderer Prozess)."""
+        self.assertTrue(W._instanz_sperren(0))
+        try:
+            import subprocess
+            code = ("import sys; sys.path.insert(0, %r); import signier_werkzeug as W; "
+                    "sys.exit(0 if W._instanz_sperren(0) else 3)") % os.path.dirname(HIER)
+            r = subprocess.run([sys.executable, "-c", code], env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                               timeout=60)
+            self.assertEqual(r.returncode, 3)
+        finally:
+            os.close(W._INSTANZ.pop("fd"))
