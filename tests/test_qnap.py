@@ -126,8 +126,9 @@ class BefehlTests(unittest.TestCase):
         pr = profil(root_wert=False)
         b = self.befehl("beiseite", pr, {"geplant_alt": "programmordner.alt-20260101-1200"})
         self.assertEqual(b, "cd '/share/BEISPIEL' && if [ -e 'programmordner.alt-20260101-1200' ]; then "
-                            "echo 'ABBRUCH: programmordner.alt-20260101-1200 gibt es schon'; "
-                            "else sudo mv -- 'programmordner' 'programmordner.alt-20260101-1200' && ls -la; fi")
+                            "echo 'ABBRUCH: programmordner.alt-20260101-1200 gibt es schon - schon beiseitegelegt'; "
+                            "elif [ -d 'programmordner' ]; then sudo mv -- 'programmordner' 'programmordner.alt-20260101-1200' "
+                            "&& ls -la; else echo 'ABBRUCH: programmordner fehlt - nichts veraendert'; fi")
         self.assertRaises(ValueError, self.befehl, "entpacken", pr)   # ohne geprüfte ZIP
         b = self.befehl("entpacken", pr, {"paket": {"sha256": "a" * 64}})
         self.assertIn("echo '" + "a" * 64 + "  programmordner.zip' | sha256sum -c - && ", b)
@@ -353,7 +354,10 @@ class InstallierenTests(Ablauf):
         for sid in ("bauen", "starten", "kontrolle"):
             self.schritt(sid)
         v = self.b.vorbereiten("alt_loeschen")
-        self.assertEqual(v["befehl"], f"cd '/share/BEISPIEL' && sudo rm -r -- '{alt}' && ls -la")
+        self.assertEqual(v["befehl"], f"cd '/share/BEISPIEL' && if [ -d 'programmordner' ] && [ -d '{alt}' ]; then "
+                                      f"sudo rm -r -- '{alt}' && ls -la; elif [ -d 'programmordner' ]; then echo 'ABBRUCH: "
+                                      f"{alt} gibt es nicht - nichts geloescht'; else echo 'ABBRUCH: programmordner fehlt - "
+                                      "der alte Ordner ist die einzige Kopie, nichts geloescht'; fi")
         self.assertRaises(ValueError, self.b.ausfuehren, "alt_loeschen", v["marke"], {"bestaetigt": True})
         v = self.b.vorbereiten("alt_loeschen")
         self.b.ausfuehren("alt_loeschen", v["marke"], {"bestaetigt": True, "name": alt})
@@ -409,7 +413,8 @@ class InstallierenTests(Ablauf):
         self.b.rueckmelden("wegstellen", "uebersprungen", {})
         v = self.b.vorbereiten("zurueckholen")
         self.assertEqual(v["befehl"], f"cd '/share/BEISPIEL' && if [ -e 'programmordner' ]; then echo 'ABBRUCH: "
-                                      f"programmordner gibt es noch'; else mv -- '{alt}' 'programmordner' && ls -la; fi")
+                                      f"programmordner gibt es noch'; elif [ -d '{alt}' ]; then mv -- '{alt}' 'programmordner' "
+                                      f"&& ls -la; else echo 'ABBRUCH: {alt} gibt es nicht - nichts veraendert'; fi")
         self.b.ausfuehren("zurueckholen", v["marke"], {"bestaetigt": True, "name": alt})
         self.b.rueckmelden("zurueckholen", "geklappt", {})
         self.assertEqual(self.b.ansicht()["alt"], "")
@@ -417,6 +422,42 @@ class InstallierenTests(Ablauf):
 
     def test_zurueck_ohne_alt_ordner(self):
         self.assertRaises(ValueError, self.b.beginnen, "zurueck")
+
+    def test_wiederholtes_beiseitelegen_behaelt_den_namen(self):
+        self.bis_beiseite()
+        v1 = self.b.vorbereiten("beiseite")
+        self.b.ausfuehren("beiseite", v1["marke"], {"bestaetigt": True, "name": "programmordner"})
+        self.b.jetzt = lambda: 1767268800.0 + 120   # zwei Minuten später noch einmal
+        v2 = self.b.vorbereiten("beiseite")
+        self.assertEqual(v2["befehl"], v1["befehl"])
+        self.b.ausfuehren("beiseite", v2["marke"], {"bestaetigt": True, "name": "programmordner"})
+        self.b.rueckmelden("beiseite", "fehler", {})
+        alt = self.b.ansicht()["alt"]
+        self.assertIn(alt, v1["befehl"])
+
+    def test_abbrechen_nach_beiseitelegen_merkt_den_rueckweg(self):
+        self.bis_beiseite()
+        v = self.b.vorbereiten("beiseite")
+        self.b.ausfuehren("beiseite", v["marke"], {"bestaetigt": True, "name": "programmordner"})
+        self.b.abbrechen()   # ohne Rückmeldung
+        alt = self.b.ansicht()["alt"]
+        self.assertRegex(alt, r"^programmordner\.alt-\d{8}-\d{4}$")
+        self.assertIn("alter Ordner gemerkt", self.protokoll())
+        self.b.beginnen("zurueck")   # Rückweg möglich
+
+    def test_loeschen_und_wegstellen_nur_mit_beiden_ordnern(self):
+        pr = profil(root_wert=True)
+        z = {"alt": "programmordner.alt-20260101-1200"}
+        b = Q.SCHRITTE["alt_loeschen"]["befehl"](pr, {}, z, False)
+        self.assertTrue(b.split("then", 1)[0].endswith("if [ -d 'programmordner' ] && [ -d 'programmordner.alt-20260101-1200' ]; "))
+        b = Q.SCHRITTE["wegstellen"]["befehl"](pr, {"geplant_kaputt": "programmordner.kaputt-20260101-1300"}, z, False)
+        self.assertIn("elif [ -d 'programmordner.alt-20260101-1200' ]; then mv -- 'programmordner' "
+                      "'programmordner.kaputt-20260101-1300'", b)
+        self.assertRaises(ValueError, Q.SCHRITTE["wegstellen"]["befehl"], pr, {}, {}, False)   # ohne gemerkten Rückweg
+        for sid in ("beiseite", "alt_loeschen", "wegstellen", "zurueckholen"):   # kein „!“ (cmd.exe)
+            b = Q.SCHRITTE[sid]["befehl"](pr, {"geplant_alt": z["alt"]}, z, False)
+            Q.befehlszeile(Q.ssh_argv(pr, b, PROG), PROG)
+            self.assertTrue(b.isascii(), b)
 
 
 class BauPruefungTests(Ablauf):

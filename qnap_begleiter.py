@@ -225,8 +225,9 @@ def _b_anhalten(pr, lauf, z, roh):
 def _b_beiseite(pr, lauf, z, roh):
     o = orte(pr)
     alt = lauf.get("geplant_alt") or alt_name(o["name"])
-    return (f"cd {q(o['e'])} && if [ -e {q(alt)} ]; then {_abbruch(alt + ' gibt es schon')}; "
-            f"else {_sudo(pr, roh)}mv -- {q(o['name'])} {q(alt)} && ls -la; fi")
+    return (f"cd {q(o['e'])} && if [ -e {q(alt)} ]; then {_abbruch(alt + ' gibt es schon - schon beiseitegelegt')}; "
+            f"elif [ -d {q(o['name'])} ]; then {_sudo(pr, roh)}mv -- {q(o['name'])} {q(alt)} && ls -la; "
+            f"else {_abbruch(o['name'] + ' fehlt - nichts veraendert')}; fi")
 
 
 def _b_entpacken(pr, lauf, z, roh):
@@ -274,7 +275,11 @@ def _b_alt_loeschen(pr, lauf, z, roh):
     alt = z.get("alt") if not roh else (z.get("alt") or o["name"] + ".alt-JJJJMMTT-hhmm")
     if not roh:
         _alt_pruefen(o, alt)
-    return f"cd {q(o['e'])} && {_sudo(pr, roh)}rm -r -- {q(alt)} && ls -la"
+    # nie die einzige Kopie löschen: der Programmordner muss da sein
+    return (f"cd {q(o['e'])} && if [ -d {q(o['name'])} ] && [ -d {q(alt)} ]; then "
+            f"{_sudo(pr, roh)}rm -r -- {q(alt)} && ls -la; "
+            f"elif [ -d {q(o['name'])} ]; then {_abbruch(alt + ' gibt es nicht - nichts geloescht')}; "
+            f"else {_abbruch(o['name'] + ' fehlt - der alte Ordner ist die einzige Kopie, nichts geloescht')}; fi")
 
 
 def _b_zip_loeschen(pr, lauf, z, roh):
@@ -289,8 +294,13 @@ def _b_images(pr, lauf, z, roh):
 def _b_wegstellen(pr, lauf, z, roh):
     o = orte(pr)
     kaputt = lauf.get("geplant_kaputt") or o["name"] + ".kaputt-" + time.strftime("%Y%m%d-%H%M")
+    alt = z.get("alt") if not roh else (z.get("alt") or o["name"] + ".alt-JJJJMMTT-hhmm")
+    if not roh:
+        _alt_pruefen(o, alt)
+    # nur wegstellen, wenn der Rückweg wirklich da ist
     return (f"cd {q(o['e'])} && if [ -e {q(kaputt)} ]; then {_abbruch(kaputt + ' gibt es schon')}; "
-            f"else {_sudo(pr, roh)}mv -- {q(o['name'])} {q(kaputt)} && ls -la; fi")
+            f"elif [ -d {q(alt)} ]; then {_sudo(pr, roh)}mv -- {q(o['name'])} {q(kaputt)} && ls -la; "
+            f"else {_abbruch(alt + ' gibt es nicht - nichts veraendert')}; fi")
 
 
 def _b_zurueckholen(pr, lauf, z, roh):
@@ -299,7 +309,8 @@ def _b_zurueckholen(pr, lauf, z, roh):
     if not roh:
         _alt_pruefen(o, alt)
     return (f"cd {q(o['e'])} && if [ -e {q(o['name'])} ]; then {_abbruch(o['name'] + ' gibt es noch')}; "
-            f"else {_sudo(pr, roh)}mv -- {q(alt)} {q(o['name'])} && ls -la; fi")
+            f"elif [ -d {q(alt)} ]; then {_sudo(pr, roh)}mv -- {q(alt)} {q(o['name'])} && ls -la; "
+            f"else {_abbruch(alt + ' gibt es nicht - nichts veraendert')}; fi")
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +417,11 @@ SCHRITTE = {
                        "„Zur vorigen Version zurück“ jederzeit zurück. Gelöscht wird er erst am Ende, wenn alles läuft.",
                        "Zur Sicherheit den Namen des Programmordners abtippen."],
         "erwartet": "Ordnerliste, darin der Ordner mit „.alt-…“, der Programmordner fehlt.",
-        "fehler": [("ABBRUCH: … gibt es schon", "Eine Minute warten und den Schritt wiederholen."),
+        "fehler": [("ABBRUCH: … gibt es schon - schon beiseitegelegt", "Der Ordner wurde schon umbenannt (z. B. beim ersten "
+                    "Ausführen). In der Liste nachsehen: Steht dort der …alt-Ordner und fehlt der Programmordner, "
+                    "„Hat geklappt“ melden. Der Name bleibt in diesem Ablauf derselbe."),
+                   ("ABBRUCH: … fehlt - nichts veraendert", "Den Programmordner gibt es nicht (mehr). Nicht weitermachen - "
+                    "ist er schon beiseitegelegt, „Zur vorigen Version zurück“ verwenden."),
                    ("Permission denied", "Ohne root: sudo nötig (Schritt „Verbindung testen“: root nein).")] + _SSH_FEHLER,
     },
     "entpacken": {
@@ -744,9 +759,9 @@ class Begleiter:
             if ablauf == "zurueck":
                 _alt_pruefen(orte(pr), z.get("alt"))
             if ablauf == "installieren" and z.get("alt"):
-                raise ValueError(f"Es liegt noch ein beiseitegelegter Ordner ({z['alt']}). Erst „Zur vorigen Version "
-                                 "zurück“ oder „Aufräumen“ (alten Ordner endgültig löschen) - sonst ginge der Rückweg "
-                                 "verloren.")
+                raise ValueError(f"Es liegt noch ein beiseitegelegter Ordner ({z['alt']}). Läuft die neue Version nicht "
+                                 "oder fehlt der Programmordner: „Zur vorigen Version zurück“. Nur wenn die neue Version "
+                                 "läuft: „Aufräumen“ (alten Ordner endgültig löschen). Sonst ginge der Rückweg verloren.")
             if ablauf == "installieren" and not pr.get("quelle"):
                 raise ValueError("Im QNAP-Profil ist kein Signier-Profil (GitHub-Repository) gewählt.")
             pr["root"] = None   # fragt Schritt „Verbindung testen“ jedes Mal neu ab
@@ -772,9 +787,13 @@ class Begleiter:
         with self.lock:
             z = self._zustand()
             lauf = z.pop("lauf", None)
+            gemerkt = (lauf or {}).get("beiseite_gestartet")
+            if gemerkt and not z.get("alt"):
+                z["alt"] = gemerkt   # „beiseitelegen“ lief schon: Rückweg nicht vergessen
             self._speichern(z)
             if lauf:
-                self.protokollieren(lauf.get("ablauf"), "-", "Ablauf abgebrochen")
+                self.protokollieren(lauf.get("ablauf"), "-", "Ablauf abgebrochen",
+                                    f"alter Ordner gemerkt: {gemerkt}" if gemerkt else "")
             return self.ansicht()
 
     def _aktuell(self, z, schritt_id):
@@ -794,7 +813,9 @@ class Begleiter:
         """Befehl genau so festlegen, wie er angezeigt und ausgeführt wird."""
         o = orte(pr)
         if s["id"] == "beiseite":
-            lauf["geplant_alt"] = alt_name(o["name"], self.jetzt())
+            # einmal festgelegt, bleibt der Name im Lauf gleich - sonst überschriebe
+            # eine Wiederholung den Namen des wirklich umbenannten Ordners
+            lauf["geplant_alt"] = lauf.get("beiseite_gestartet") or alt_name(o["name"], self.jetzt())
         if s["id"] == "wegstellen":
             lauf["geplant_kaputt"] = o["name"] + ".kaputt-" + time.strftime("%Y%m%d-%H%M", time.localtime(self.jetzt()))
         if s["art"] == "ssh":

@@ -10,15 +10,22 @@ Prüft die Ed25519-Signatur und die Prüfsumme JEDER Datei (Profil-Regel
 „alle Dateien außer Ausnahmen“; .git, .github, __pycache__, *.pyc und
 SIGNATUR.json sind immer ausgenommen). Es gilt dieselbe Regel wie beim
 Signieren im Signier-Werkzeug (Test tests/test_sicherheit.py vergleicht beide):
+- Ausnahmen sind fnmatch-Muster mit „/“ als Trenner; Groß-/Kleinschreibung
+  zählt auf jedem Betriebssystem (fnmatchcase),
 - zusätzliche, fehlende und veränderte Dateien sind Fehler,
+- kompilierte Python-Dateien (__pycache__/, *.pyc) außerhalb ausgenommener
+  Ordner sind ein Fehler: sie werden nicht geprüft, Python lädt sie aber -
+  vor der Prüfung löschen,
 - Verknüpfungen (Symlinks, Junctions), FIFOs, Sockets und Geräte sind Fehler -
   auch wenn sie unter eine Ausnahme fielen; ein ausgenommener Ordner („…/*“)
   wird gar nicht betreten,
 - zwei Pfade, die unter Windows gleich wären (Groß-/Kleinschreibung,
   Unicode-Normalform), sind ein Fehler.
-Wichtig: prüfen, BEVOR die neue Version installiert oder gestartet wird, und
-den öffentlichen Schlüssel fest im Programm hinterlegen (nicht aus einer
-Datei, die ein Angreifer ändern könnte).
+Wichtig: prüfen, BEVOR die neue Version installiert oder gestartet wird. Den
+öffentlichen Schlüssel als Voreinstellung im Programm hinterlegen; ersetzen
+darf ihn nur der Betreiber (Umgebungsvariable/Admin-Einstellung), nie eine
+Datei, die mit einem Update kommt. Jede Ausnahme aus pruefen() ist ein
+SignaturFehler und heißt: nicht installieren.
 """
 import base64
 import fnmatch
@@ -95,8 +102,12 @@ def _eintrag_art(pfad, rel):
     return art
 
 
-def _dateiliste(wurzel, ausschluss):
-    muster = STANDARD_AUSSCHLUSS + [m.strip() for m in (ausschluss or []) if m.strip()]
+def _muster(ausschluss):
+    return STANDARD_AUSSCHLUSS + [m.strip().replace("\\", "/") for m in (ausschluss or []) if m.strip()]
+
+
+def _dateiliste(wurzel, ausschluss, kompilate=None):
+    muster = _muster(ausschluss)
     eintraege = []
     sig = os.path.join(wurzel, "SIGNATUR.json")
     if os.path.lexists(sig) and _eintrag_art(sig, "SIGNATUR.json") != "datei":
@@ -109,10 +120,13 @@ def _dateiliste(wurzel, ausschluss):
         for name in sorted(os.listdir(ordner)):
             rel = f"{rel_basis}/{name}" if rel_basis else name
             voll = os.path.join(ordner, name)
-            if _eintrag_art(voll, rel) == "ordner":
-                if not any(m.endswith("*") and fnmatch.fnmatch(rel + "/", m) for m in muster):
+            ist_ordner = _eintrag_art(voll, rel) == "ordner"
+            if kompilate is not None and (name == "__pycache__" if ist_ordner else name.endswith(".pyc")):
+                kompilate.append(rel)
+            if ist_ordner:
+                if not any(m.endswith("*") and fnmatch.fnmatchcase(rel + "/", m) for m in muster):
                     laufen(rel, tiefe + 1)
-            elif not any(fnmatch.fnmatch(rel, m) or fnmatch.fnmatch(name, m) for m in muster):
+            elif not any(fnmatch.fnmatchcase(rel, m) or fnmatch.fnmatchcase(name, m) for m in muster):
                 eintraege.append((rel, voll))
     laufen("", 0)
     dateien, ordner = {}, set()
@@ -138,7 +152,7 @@ def pruefen(wurzel, oeffentlicher_schluessel, ausschluss=None):
         sig = json.loads(_lesen(os.path.join(wurzel, "SIGNATUR.json"), MAX_SIGNATUR).decode("utf-8"))
         if not isinstance(sig, dict) or sig.get("format") != FORMAT or not isinstance(sig.get("dateien"), dict):
             raise ValueError
-    except (OSError, ValueError, UnicodeDecodeError, SignaturFehler):
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError, SignaturFehler):
         raise SignaturFehler("SIGNATUR.json fehlt oder ist ungültig")
     version = str(sig.get("version") or "")
     nachricht = json.dumps({"format": FORMAT, "version": version, "dateien": sig["dateien"]},
@@ -148,7 +162,14 @@ def pruefen(wurzel, oeffentlicher_schluessel, ausschluss=None):
             base64.b64decode(str(sig.get("signatur") or ""), validate=True), nachricht)
     except (InvalidSignature, ValueError, TypeError):
         raise SignaturFehler("Signatur ungültig")
-    ist = _dateiliste(wurzel, ausschluss)
+    kompilate = []
+    try:
+        ist = _dateiliste(wurzel, ausschluss, kompilate)
+    except OSError as e:
+        raise SignaturFehler(f"Bestand nicht lesbar ({e.__class__.__name__})")
+    if kompilate:
+        raise SignaturFehler("Kompilierte Python-Dateien gefunden (nicht geprüft, würden aber geladen): "
+                             + ", ".join(kompilate[:10]) + " - vor der Prüfung löschen")
     soll = sig["dateien"]
     abweichend = sorted(n for n in set(ist) | set(soll) if ist.get(n) != soll.get(n))
     if abweichend:

@@ -17,6 +17,7 @@ Schlüsselbund des Betriebssystems (Paket "keyring") oder - ohne sicheren
 Speicher - nur für die laufende Sitzung im Arbeitsspeicher (siehe SICHERHEIT.md).
 """
 import base64
+import contextlib
 import fnmatch
 import hashlib
 import io
@@ -60,9 +61,10 @@ _TAG_VERSION_RE = re.compile(r"^[0-9][0-9A-Za-z._-]{0,38}$")
 WERKZEUG_REPO = "Hansi478/signier-werkzeug"
 WERKZEUG_SCHLUESSEL = "7OhcbQl3LZIM488s+WIDQMr4YhQmGd4dgyxRgun5XAc="
 EXE_NAME = "Signier-Werkzeug.exe"
-# SHA-256 von Pruefmodul/signatur_pruefen.py dieses Stands - steht im Prompt zur
-# Einbindung (die Sitzung vergleicht damit); tests/test_einbindung.py prüft sie
-PRUEFMODUL_SHA256 = "0a30d9f5fda8757147da65bc7c81f9f26c3d020610069609a7a94e123a171966"
+# SHA-256 von Pruefmodul/signatur_pruefen.py dieses Stands über den Inhalt mit
+# LF-Zeilenenden (ein Windows-Checkout hat CRLF) - steht im Prompt zur Einbindung
+# (die Sitzung vergleicht damit); tests/test_einbindung.py prüft sie
+PRUEFMODUL_SHA256 = "53f1c175e679d063568d512fe925c49ec6db13169a005559e95021c8059a6b4b"
 _VERSION_RE = re.compile(r"^(\d{1,4})\.(\d{1,4})\.(\d{1,4})$")
 _EXE_MIN, _EXE_MAX = 5 * 1024 * 1024, 150 * 1024 * 1024
 MB = 1024 * 1024
@@ -346,10 +348,18 @@ def _eindeutig(eintraege):
         raise ValueError(f"Datei und Ordner kollidieren (unter Windows gleich): {dateien[k]}")
 
 
-def dateiliste(wurzel, regel="alle", ausschluss=None):
+def ausschluss_muster(ausschluss):
+    """Feste + eigene Ausnahmen; „\\“ gilt als „/“ (Muster wie im Prüfmodul)."""
+    return STANDARD_AUSSCHLUSS + [m.strip().replace("\\", "/") for m in (ausschluss or []) if m.strip()]
+
+
+def dateiliste(wurzel, regel="alle", ausschluss=None, kompilate=None):
     """{relativer Pfad (mit /): Prüfsumme} des signierten Bestands - die
     zentrale Regel für Signieren und Prüfen (siehe oben). ValueError bei
-    Verknüpfungen, Sondertypen, Kollisionen."""
+    Verknüpfungen, Sondertypen, Kollisionen. Ausnahmen: fnmatchcase mit „/“,
+    also auf jedem Betriebssystem gleich (Groß-/Kleinschreibung zählt).
+    kompilate (Liste): nimmt bei „alle“ __pycache__-Ordner und *.pyc auf - sie
+    werden nicht signiert, Python lädt sie aber."""
     eintraege = []
     sig = os.path.join(wurzel, SIGNATUR_DATEI)
     if os.path.lexists(sig) and _eintrag_art(sig, SIGNATUR_DATEI) != "datei":
@@ -373,12 +383,14 @@ def dateiliste(wurzel, regel="alle", ausschluss=None):
                     raise ValueError(f"{name} ist kein Ordner - nicht erlaubt.")
                 _durchlaufen(wurzel, name, py_cache, eintraege, 1)
     else:
-        muster = STANDARD_AUSSCHLUSS + [m.strip() for m in (ausschluss or []) if m.strip()]
+        muster = ausschluss_muster(ausschluss)
 
         def ausgenommen(rel, name, ist_ordner):
+            if kompilate is not None and (name == "__pycache__" if ist_ordner else name.endswith(".pyc")):
+                kompilate.append(rel)
             if ist_ordner:   # nur Muster, die alles darunter treffen ("…/*")
-                return any(m.endswith("*") and fnmatch.fnmatch(rel + "/", m) for m in muster)
-            return any(fnmatch.fnmatch(rel, m) or fnmatch.fnmatch(name, m) for m in muster)
+                return any(m.endswith("*") and fnmatch.fnmatchcase(rel + "/", m) for m in muster)
+            return any(fnmatch.fnmatchcase(rel, m) or fnmatch.fnmatchcase(name, m) for m in muster)
         _durchlaufen(wurzel, "", ausgenommen, eintraege)
     _eindeutig(eintraege)
     return {rel: pruefsumme(voll) for rel, voll in eintraege}
@@ -462,10 +474,15 @@ def pruefen(wurzel, oeffentlich, regel="alle", ausschluss=None):
             base64.b64decode(sig.get("signatur") or "", validate=True), nachricht(str(sig.get("version") or ""), sig["dateien"]))
     except (InvalidSignature, ValueError, TypeError):
         return {"ok": False, "version": sig.get("version"), "fehler": "Signatur ungültig (anderer Schlüssel oder verändert)."}
+    kompilate = [] if regel != "speedrace" else None
     try:
-        ist = dateiliste(wurzel, regel, ausschluss)
-    except ValueError as e:
+        ist = dateiliste(wurzel, regel, ausschluss, kompilate)
+    except (ValueError, OSError) as e:
         return {"ok": False, "version": sig.get("version"), "fehler": str(e)}
+    if kompilate:
+        return {"ok": False, "version": sig.get("version"), "abweichend": kompilate[:50], "arten": {},
+                "fehler": "Kompilierte Python-Dateien (__pycache__/, *.pyc) gefunden: nicht signiert, würden aber geladen "
+                          "- das Prüfmodul lehnt sie ab. Vor dem Verteilen löschen."}
     soll = sig["dateien"]
     arten = {n: ("fehlt" if n not in ist else "zusätzlich" if n not in soll else "verändert")
              for n in set(ist) | set(soll) if ist.get(n) != soll.get(n)}
@@ -639,7 +656,8 @@ def bau_pruefen(wurzel, oeffentlich):
 def signieren_mit_bau(wurzel, profil, kennwort, git_bau=None):
     """Für Profile „Speedrace-Dashboard“: SIGNATUR.json wie `signieren` und dazu
     SIGNATUR-BAU.json (gleicher Schlüssel, eine Kennworteingabe). Beide Listen
-    werden vor dem Schreiben gebildet - ein Fehler schreibt nichts.
+    werden vor dem Schreiben gebildet - ein Fehler beim Bilden schreibt nichts,
+    ein Fehler beim Schreiben setzt die Bau-Signatur wieder zurück.
     git_bau: Bau-Dateien laut Git-Baum (bei GitHub), die Liste muss genau passen.
     -> (Version, Anzahl, Inhalt, Bau-Inhalt oder None, Bau-Anzahl)"""
     privat = privat_laden(schluessel_pfad(profil), kennwort)
@@ -667,11 +685,34 @@ def signieren_mit_bau(wurzel, profil, kennwort, git_bau=None):
         oeffentlich.verify(base64.b64decode(sig["signatur"]), bau_nachricht(sig["version"], sig["dateien"]))
         if sig["dateien"] != bau or sig["version"] != version or sig["format"] != BAU_FORMAT:
             raise ValueError("Geschriebene Bau-Signatur passt nicht - abgebrochen.")
-    if bau_inhalt:
-        bau_gegenprobe(bau_inhalt.encode("utf-8"))
-    atomar_schreiben(wurzel, SIGNATUR_DATEI, inhalt.encode("utf-8"), 0o644, _signatur_json_pruefen)
-    if bau_inhalt:
-        atomar_schreiben(wurzel, BAU_SIGNATUR_DATEI, bau_inhalt.encode("utf-8"), 0o644, bau_gegenprobe)
+    bau_pfad = os.path.join(wurzel, BAU_SIGNATUR_DATEI)
+    if not bau_inhalt:
+        if os.path.lexists(bau_pfad):
+            raise ValueError(f"Es gibt keine Bau-Dateien mehr, aber noch eine alte {BAU_SIGNATUR_DATEI} - bitte entfernen "
+                             "und neu signieren. Nichts geschrieben.")
+        atomar_schreiben(wurzel, SIGNATUR_DATEI, inhalt.encode("utf-8"), 0o644, _signatur_json_pruefen)
+        return version, len(dateien), inhalt, None, 0
+    bau_gegenprobe(bau_inhalt.encode("utf-8"))
+    # Beide Dateien gehören zusammen: erst die Bau-Signatur (alten Stand merken),
+    # dann SIGNATUR.json; scheitert diese, wird die Bau-Signatur zurückgesetzt.
+    try:
+        bau_alt = regulaer_lesen(bau_pfad, MAX_SIGNATUR_BYTES)
+    except FileNotFoundError:
+        bau_alt = None
+    except (OSError, ValueError) as e:
+        raise ValueError(f"{BAU_SIGNATUR_DATEI} ist nicht lesbar oder keine normale Datei ({e}) - nichts geschrieben.")
+    atomar_schreiben(wurzel, BAU_SIGNATUR_DATEI, bau_inhalt.encode("utf-8"), 0o644, bau_gegenprobe)
+    try:
+        atomar_schreiben(wurzel, SIGNATUR_DATEI, inhalt.encode("utf-8"), 0o644, _signatur_json_pruefen)
+    except BaseException:
+        try:
+            if bau_alt is None:
+                os.remove(bau_pfad)
+            else:
+                atomar_schreiben(wurzel, BAU_SIGNATUR_DATEI, bau_alt, 0o644)
+        except (OSError, ValueError):
+            pass
+        raise
     return version, len(dateien), inhalt, bau_inhalt, len(bau)
 
 
@@ -685,16 +726,26 @@ def _profile_datei():
     return os.path.join(daten_ordner(), "profile.json")
 
 
-def profile_laden():
+def json_datei_laden(pfad, limit=16 * MB):
+    """JSON-Objekt aus einer Datei des Datenordners; fehlt sie: {}. Ist sie
+    beschädigt, gibt es einen Fehler statt {} - sonst überschriebe das nächste
+    Speichern alle Einträge (Profile, gemerkter QNAP-Rückweg …)."""
     try:
-        daten = regulaer_lesen(_profile_datei(), 16 * MB)
+        daten = regulaer_lesen(pfad, limit)
     except FileNotFoundError:
         return {}
     try:
-        d = json.loads(daten.decode("utf-8"))
-        return d if isinstance(d, dict) else {}
-    except (ValueError, UnicodeDecodeError):
-        return {}
+        d = json.loads(daten.decode("utf-8-sig"))   # auch mit BOM (z. B. im Editor gespeichert)
+        if not isinstance(d, dict):
+            raise ValueError("kein JSON-Objekt")
+        return d
+    except (ValueError, UnicodeDecodeError, RecursionError) as e:
+        raise ValueError(f"{pfad} ist beschädigt ({e.__class__.__name__}) und wird nicht überschrieben. Bitte die Datei "
+                         "reparieren oder umbenennen (dann beginnt das Werkzeug neu) und das Werkzeug neu laden.") from None
+
+
+def profile_laden():
+    return json_datei_laden(_profile_datei())
 
 
 def profile_speichern(d):
@@ -789,7 +840,10 @@ def geheim_entfernen():
 def geheim_lesen(wert):
     wert = str(wert or "")
     if wert.startswith("dpapi:") and os.name == "nt":
-        return _merken(_dpapi(base64.b64decode(wert[6:]), False).decode("utf-8"))
+        try:
+            return _merken(_dpapi(base64.b64decode(wert[6:]), False).decode("utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            return ""   # z. B. anderer PC/Windows-Benutzer, Kennwort zurückgesetzt (Anzeige: „nicht lesbar“)
     if wert == "keyring:":
         kr = _keyring()
         try:
@@ -833,6 +887,13 @@ _JSON_MAX = 64 * MB
 class HttpFehler(ValueError):
     def __init__(self, code):
         super().__init__(f"GitHub-Fehler {code}.")
+        self.code = code
+
+
+class GitHubFehler(ValueError):
+    """Fehlerantwort der GitHub-API (deutsche Meldung, HTTP-Code in .code)."""
+    def __init__(self, text, code):
+        super().__init__(text)
         self.code = code
 
 
@@ -925,7 +986,7 @@ def _gh(pfad, token, methode="GET", daten=None, roh=False, timeout=60, limit=_JS
         inhalt = _anfrage(GITHUB_API + pfad, token, methode, json.dumps(daten).encode("utf-8") if daten is not None else None,
                           kopf, timeout, limit, ziel)
     except HttpFehler as e:
-        raise ValueError(_API_FEHLER.get(e.code, f"GitHub-Fehler {e.code}.")) from None
+        raise GitHubFehler(_API_FEHLER.get(e.code, f"GitHub-Fehler {e.code}."), e.code) from None
     if roh or ziel is not None:
         return inhalt
     return json.loads(inhalt.decode("utf-8") or "{}")
@@ -1118,31 +1179,6 @@ def github_laden(repo, zweig, token, ziel, grenzen=None):
     return ordner, stand
 
 
-def github_hochladen(repo, zweig, token, inhalt, version, stand):
-    """SIGNATUR.json hochladen -> voller Commit, der sie enthält. Ist sie auf
-    GitHub schon genau so vorhanden, gibt es keinen neuen Commit."""
-    if _zweig_stand(repo, zweig, token) != stand:
-        raise ValueError("Auf GitHub hat sich zwischendurch etwas geändert - bitte noch einmal signieren.")
-    pfad = f"/repos/{repo}/contents/{SIGNATUR_DATEI}"
-    alt = None
-    try:
-        alt = _gh(pfad + f"?ref={urllib.parse.quote(zweig, safe='')}", token)
-    except ValueError:
-        pass
-    if alt and alt.get("content"):
-        try:
-            if base64.b64decode(alt["content"]).decode("utf-8") == inhalt:
-                return stand   # unverändert (z. B. noch einmal signiert)
-        except (ValueError, UnicodeDecodeError):
-            pass
-    daten = {"message": f"SIGNATUR.json für Version {version or '?'}", "branch": zweig,
-             "content": base64.b64encode(inhalt.encode("utf-8")).decode("ascii")}
-    if alt and alt.get("sha"):
-        daten["sha"] = alt["sha"]
-    d = _gh(pfad, token, "PUT", daten)
-    return (d.get("commit") or {}).get("sha", "")
-
-
 def github_baum(repo, token, commit):
     """Alle Einträge des Git-Baums eines Commits (rekursiv)."""
     d = _gh(f"/repos/{repo}/git/trees/{commit}?recursive=1", token)
@@ -1157,16 +1193,22 @@ def _git_blob_sha(daten):
     return hashlib.sha1(b"blob %d\0" % len(daten) + daten).hexdigest()
 
 
+def hochladen_noetig(dateien, baum):
+    """Weicht eine der Dateien (Name -> Text) vom Git-Baum des Stands ab?"""
+    vorhanden = {str(e.get("path")): str(e.get("sha")) for e in baum if e.get("type") == "blob"}
+    return any(vorhanden.get(n) != _git_blob_sha(t.encode("utf-8")) for n, t in dateien.items())
+
+
 def github_hochladen_commit(repo, zweig, token, dateien, version, stand, baum):
-    """Mehrere Dateien (Name -> Text) in EINEM Commit auf den Stand `stand`
-    hochladen (Git-Data-API) und den Zweig vorspulen (ohne force) -> Commit.
-    Sind alle schon genau so vorhanden, gibt es keinen neuen Commit."""
+    """Signaturdateien (Name -> Text) in EINEM Commit genau auf den geprüften
+    Stand `stand` hochladen (Git-Data-API, Vorgänger = stand) und den Zweig
+    nur vorspulen (ohne force) -> Commit. Hat sich der Zweig geändert, wird
+    abgebrochen. Sind alle Dateien schon genau so vorhanden: kein neuer Commit."""
     if _zweig_stand(repo, zweig, token) != stand:
         raise ValueError("Auf GitHub hat sich zwischendurch etwas geändert - bitte noch einmal signieren.")
-    vorhanden = {str(e.get("path")): str(e.get("sha")) for e in baum if e.get("type") == "blob"}
-    neu = {n: t.encode("utf-8") for n, t in dateien.items()}
-    if all(vorhanden.get(n) == _git_blob_sha(b) for n, b in neu.items()):
+    if not hochladen_noetig(dateien, baum):
         return stand
+    neu = {n: t.encode("utf-8") for n, t in dateien.items()}
     tree = (_gh(f"/repos/{repo}/git/commits/{stand}", token).get("tree") or {}).get("sha")
     if not re.fullmatch(r"[0-9a-f]{40}", str(tree or "")):
         raise ValueError("Unerwartete Antwort von GitHub (Commit).")
@@ -1179,7 +1221,7 @@ def github_hochladen_commit(repo, zweig, token, dateien, version, stand, baum):
         eintraege.append({"path": n, "mode": "100644", "type": "blob", "sha": blob})
     neuer_baum = _gh(f"/repos/{repo}/git/trees", token, "POST", {"base_tree": tree, "tree": eintraege}).get("sha")
     commit = _gh(f"/repos/{repo}/git/commits", token, "POST",
-                 {"message": f"SIGNATUR.json und {BAU_SIGNATUR_DATEI} für Version {version or '?'}",
+                 {"message": f"{' und '.join(sorted(dateien, key=lambda n: n != SIGNATUR_DATEI))} für Version {version or '?'}",
                   "tree": neuer_baum, "parents": [stand]}).get("sha")
     if not re.fullmatch(r"[0-9a-f]{40}", str(commit or "")):
         raise ValueError("Unerwartete Antwort von GitHub (neuer Commit).")
@@ -1187,17 +1229,26 @@ def github_hochladen_commit(repo, zweig, token, dateien, version, stand, baum):
         _gh(f"/repos/{repo}/git/refs/heads/{urllib.parse.quote(zweig, safe='/')}", token, "PATCH",
             {"sha": commit, "force": False})
     except ValueError:
+        try:   # Zeitüberschreitung o. Ä., nachdem GitHub schon vorgespult hat?
+            if _zweig_stand(repo, zweig, token) == commit:
+                return commit
+        except ValueError:
+            pass
         raise ValueError("Der Zweig ließ sich nicht vorspulen (zwischendurch geändert oder geschützt) - "
                          "nichts veröffentlicht, bitte noch einmal signieren.") from None
     return commit
 
 
 def _tag_commit(repo, token, name):
-    """Commit, auf den der Tag zeigt (auch bei annotierten Tags), oder None."""
+    """Commit, auf den der Tag zeigt (auch bei annotierten Tags), oder None,
+    wenn es ihn nicht gibt (404). Jeder andere Fehler (Netz, Rechte, Limit)
+    wird weitergereicht - sonst gälte ein vorhandener Tag als „frei“."""
     try:
         ref = _gh(f"/repos/{repo}/git/ref/tags/{urllib.parse.quote(name, safe='')}", token)
-    except ValueError:
-        return None
+    except GitHubFehler as e:
+        if e.code == 404:
+            return None
+        raise ValueError(f"Tag {name} ließ sich nicht abfragen: {e}") from None
     obj = (ref or {}).get("object") or {} if isinstance(ref, dict) else {}
     for _ in range(5):
         if obj.get("type") != "tag":
@@ -1206,15 +1257,23 @@ def _tag_commit(repo, token, name):
     return None
 
 
-def github_tag_frei(repo, token, version, stand):
-    """Vor dem Hochladen: ein vorhandener Tag v<Version> darf nur schon genau
-    auf diesen Stand zeigen - veröffentlichte Versionen werden nie verschoben."""
+def github_tag_frei(repo, token, version, stand, neuer_commit):
+    """Vor dem Hochladen: Gibt es den Tag v<Version> schon, muss er genau auf
+    den Stand zeigen, der danach signiert ist - also auf `stand`, und es darf
+    kein neuer Commit nötig sein. Sonst Abbruch, bevor etwas hochgeladen wird
+    (veröffentlichte Versionen werden nie verschoben)."""
     if not _TAG_VERSION_RE.match(version or ""):
-        return
+        raise ValueError("VERSION fehlt oder ist ungültig - ohne gültige Version kein Tag. Bitte VERSION korrigieren.")
     vorhanden = _tag_commit(repo, token, f"v{version}")
-    if vorhanden and vorhanden != stand:
-        raise ValueError(f"Den Tag v{version} gibt es schon (auf {vorhanden[:7]}). Eine veröffentlichte Version wird "
-                         "nicht verändert - bitte VERSION erhöhen und neu signieren.")
+    if not vorhanden or (vorhanden == stand and not neuer_commit):
+        return
+    if vorhanden == stand:
+        raise ValueError(f"Den Tag v{version} gibt es schon - er zeigt auf den noch nicht signierten Stand {stand[:7]}. "
+                         "Die Signatur käme in einen neuen Commit, der Tag bliebe auf dem unsignierten Stand. Nichts "
+                         "hochgeladen. Ursache ist oft ein Workflow, der Tags automatisch setzt (entfernen) - "
+                         "bitte VERSION erhöhen und neu signieren.")
+    raise ValueError(f"Den Tag v{version} gibt es schon (auf {vorhanden[:7]}). Eine veröffentlichte Version wird "
+                     "nicht verändert - bitte VERSION erhöhen und neu signieren.")
 
 
 def github_tag_setzen(repo, token, version, commit):
@@ -1230,7 +1289,12 @@ def github_tag_setzen(repo, token, version, commit):
         return name
     if vorhanden:
         raise ValueError(f"Tag {name} zeigt schon auf einen anderen Stand ({vorhanden[:7]}) und wird nicht verschoben.")
-    _gh(f"/repos/{repo}/git/refs", token, "POST", {"ref": f"refs/tags/{name}", "sha": commit})
+    try:
+        _gh(f"/repos/{repo}/git/refs", token, "POST", {"ref": f"refs/tags/{name}", "sha": commit})
+    except ValueError:
+        if _tag_commit(repo, token, name) == commit:   # gleichzeitig schon gesetzt
+            return name
+        raise
     return name
 
 
@@ -1554,6 +1618,8 @@ def _ansicht(d):
     wert = str(d.get("github_token") or "")
     gespeichert = ("dpapi" if wert.startswith("dpapi:") else "schluesselbund" if wert == "keyring:"
                    else "klartext" if wert.startswith("klar:") else "sitzung" if _sitzung["token"] else "")
+    if gespeichert == "dpapi" and os.name == "nt" and not geheim_lesen(wert):
+        gespeichert = "unlesbar"
     return {"profile": profile, "token": bool(gespeichert), "token_speicher": gespeichert,
             "token_methode": token_speicher_art(), "version": VERSION,
             "daten": daten_ordner(), "alter_schluessel": alt if os.path.isfile(alt) else ""}
@@ -1573,15 +1639,7 @@ def _token_meldung(d):
 # lesend: Repository, öffentlicher Schlüssel und Token für den Download).
 # ---------------------------------------------------------------------------
 def _qnap_laden():
-    try:
-        daten = regulaer_lesen(os.path.join(daten_ordner(), "qnap.json"), MB)
-    except FileNotFoundError:
-        return {}
-    try:
-        d = json.loads(daten.decode("utf-8"))
-        return d if isinstance(d, dict) else {}
-    except (ValueError, UnicodeDecodeError):
-        return {}
+    return json_datei_laden(os.path.join(daten_ordner(), "qnap.json"), MB)
 
 
 def _qnap_speichern(d):
@@ -1632,6 +1690,12 @@ def qnap_paket(pr, token, tag, name, ziel):
             with zipfile.ZipFile(archiv) as z:   # ausführbare Dateien (z. B. Startskript) behalten ihr Recht
                 ausfuehrbar = {i.filename.partition("/")[2] for i in z.infolist()
                                if not i.filename.endswith("/") and (i.external_attr >> 16) & 0o111}
+        kompilat = sorted(os.path.relpath(os.path.join(w, n), ordner).replace(os.sep, "/")
+                          for w, ds, fs in os.walk(ordner) for n in ds + fs
+                          if n == "__pycache__" or n.endswith(".pyc"))
+        if kompilat:   # nicht signiert, würden im Container aber geladen (Programmordner ist eingebunden)
+            raise ValueError(f"{tag}: enthält kompilierte Python-Dateien ({', '.join(kompilat[:5])}) - nicht signiert, "
+                             "würden aber geladen. Nicht installieren.")
         r = pruefen(ordner, pr.get("oeffentlich") or "", pr.get("regel", "alle"), pr.get("ausschluss"))
         if not r.get("ok"):
             liste = ", ".join(r.get("abweichend") or [])[:300]
@@ -1777,6 +1841,8 @@ def aktion(name, p):
             return {**_ansicht(d), "meldung": "Schlüssel übernommen. Die ursprüngliche Datei bleibt, wo sie ist."}
         if name == "token_speichern":
             t = str(p.get("token") or "").strip()
+            if not t and p.get("entfernen") is not True:
+                raise ValueError("Bitte ein Token eingeben. (Ein gespeichertes Token entfernt der Knopf „Entfernen“.)")
             if t and not re.fullmatch(r"[A-Za-z0-9_]{20,255}", t):
                 raise ValueError("Das sieht nicht wie ein GitHub-Token aus.")
             if not t:
@@ -1875,34 +1941,37 @@ def aktion(name, p):
             if not token:
                 raise ValueError("Zum Hochladen wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
             bau_text = ""
+            baum = github_baum(pr["repo"], token, stand)
             if speedrace:
-                baum = github_baum(pr["repo"], token, stand)
                 version, anzahl, inhalt, bau_inhalt, bau_anzahl = signieren_mit_bau(
                     ordner, pr, str(p.get("kennwort") or ""), bau_aus_baum(baum))
             else:
                 version, anzahl, inhalt = signieren(ordner, pr, str(p.get("kennwort") or ""))
                 bau_inhalt = None
-            github_tag_frei(pr["repo"], token, version, stand)
+            if not _TAG_VERSION_RE.match(version or ""):
+                bom = " (die Datei beginnt mit einem BOM - bitte ohne BOM speichern)" if version.startswith("\ufeff") else ""
+                raise ValueError(f"VERSION fehlt oder ist ungültig ({version!r}){bom} - nichts hochgeladen.")
+            dateien = {SIGNATUR_DATEI: inhalt, **({BAU_SIGNATUR_DATEI: bau_inhalt} if bau_inhalt else {})}
+            github_tag_frei(pr["repo"], token, version, stand, hochladen_noetig(dateien, baum))
+            commit = github_hochladen_commit(pr["repo"], pr.get("zweig") or "main", token, dateien, version, stand, baum)
             if bau_inhalt:
-                commit = github_hochladen_commit(pr["repo"], pr.get("zweig") or "main", token,
-                                                 {SIGNATUR_DATEI: inhalt, BAU_SIGNATUR_DATEI: bau_inhalt}, version,
-                                                 stand, baum)
                 bau_text = f" {BAU_SIGNATUR_DATEI} für {bau_anzahl} Bau-Dateien im selben Commit."
-            else:
-                commit = github_hochladen(pr["repo"], pr.get("zweig") or "main", token, inhalt, version, stand)
-                if speedrace:
-                    bau_text = " Hinweis: keine Bau-Dateien (Dockerfile, tools/ …) gefunden - keine SIGNATUR-BAU.json erzeugt."
+            elif speedrace:
+                bau_text = " Hinweis: keine Bau-Dateien (Dockerfile, tools/ …) gefunden - keine SIGNATUR-BAU.json erzeugt."
+            namen = " und ".join(dateien)
+            hoch = (f"{namen} {'war' if len(dateien) == 1 else 'waren'} schon aktuell" if commit == stand
+                    else f"{namen} hochgeladen (Commit {commit[:7]})")
             try:
                 tag = github_tag_setzen(pr["repo"], token, version, commit)
-                tag_text = f" Tag {tag} gesetzt." if tag else ""
             except ValueError as e:
-                tag_text = f" Tag konnte nicht gesetzt werden: {e}"
-        hoch = "SIGNATUR.json war schon aktuell" if commit == stand else f"SIGNATUR.json hochgeladen (Commit {commit[:7]})"
-        if bau_inhalt:
-            hoch = hoch.replace("SIGNATUR.json war", "SIGNATUR.json und SIGNATUR-BAU.json waren").replace(
-                "SIGNATUR.json hochgeladen", "SIGNATUR.json und SIGNATUR-BAU.json hochgeladen")
-        return {"ok": True, "meldung": f"Version {version or '(ohne)'} ({anzahl} Dateien, Stand {stand[:7]}) signiert, "
-                                       f"{hoch}.{bau_text}{tag_text} Jetzt kann das Update eingespielt werden."}
+                raise ValueError(f"Version {version} signiert, {hoch}, aber der Tag v{version} konnte nicht gesetzt "
+                                 f"werden: {e} Bitte noch einmal „signieren“ - das setzt den Tag, ohne neu "
+                                 "hochzuladen. Bis dahin noch nicht verteilen.") from None
+            if not tag:
+                raise ValueError(f"Version {version} signiert, {hoch}, aber kein Tag gesetzt (unerwartete Antwort von "
+                                 "GitHub). Bitte noch einmal „signieren“. Bis dahin noch nicht verteilen.")
+        return {"ok": True, "meldung": f"Version {version} ({anzahl} Dateien, Stand {stand[:7]}) signiert, "
+                                       f"{hoch}.{bau_text} Tag {tag} gesetzt. Jetzt kann das Update eingespielt werden."}
     raise ValueError("Unbekannte Aktion.")
 
 
@@ -1912,7 +1981,9 @@ def aktion(name, p):
 class Server:
     def __init__(self):
         self.token = secrets.token_urlsafe(24)
-        self.letzter_kontakt = time.time()
+        self.letzter_kontakt = time.monotonic()
+        self.aktiv = 0                      # laufende Aktionen (Beenden/Neustart warten darauf)
+        self._aktiv_lock = threading.Lock()
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.port = self.httpd.server_address[1]
 
@@ -1944,7 +2015,7 @@ class Server:
                 q = urllib.parse.parse_qs(url.query)
                 if not self._host_ok() or url.path != "/" or q.get("t", [""])[0] != server.token:
                     return self._senden(403, "Zugriff verweigert.", "text/plain; charset=utf-8")
-                server.letzter_kontakt = time.time()
+                server.letzter_kontakt = time.monotonic()
                 self._senden(200, SEITE.replace("__TOKEN__", server.token).replace("__VERSION__", VERSION)
                              .replace("__REPO__", WERKZEUG_REPO),
                              "text/html; charset=utf-8")
@@ -1953,7 +2024,7 @@ class Server:
                 if not self._host_ok() or self.headers.get("X-Token") != server.token \
                         or self.headers.get("Origin") not in (None, f"http://127.0.0.1:{server.port}"):
                     return self._senden(403, json.dumps({"fehler": "Zugriff verweigert."}))
-                server.letzter_kontakt = time.time()
+                server.letzter_kontakt = time.monotonic()
                 name = self.path.rsplit("/", 1)[-1]
                 try:
                     laenge = min(int(self.headers.get("Content-Length") or 0), 1024 * 1024)
@@ -1961,10 +2032,14 @@ class Server:
                     if name == "ping":
                         return self._senden(200, "{}")
                     if name == "beenden":
+                        if server.aktiv:
+                            raise ValueError("Es läuft noch ein Vorgang (z. B. Signieren oder Hochladen). Bitte warten, "
+                                             "bis er fertig ist - sonst bliebe er halb erledigt.")
                         self._senden(200, "{}")
                         threading.Thread(target=server.httpd.shutdown, daemon=True).start()
                         return
-                    antwort = aktion(name, p if isinstance(p, dict) else {})
+                    with server._aktion_laeuft():
+                        antwort = aktion(name, p if isinstance(p, dict) else {})
                     self._senden(200, json.dumps(antwort, ensure_ascii=False))
                     if antwort.get("neustart"):
                         threading.Thread(target=server.neu_starten, daemon=True).start()
@@ -1975,9 +2050,27 @@ class Server:
                                                  ensure_ascii=False))
         return H
 
+    @contextlib.contextmanager
+    def _aktion_laeuft(self):
+        with self._aktiv_lock:
+            self.aktiv += 1
+        try:
+            yield
+        finally:
+            with self._aktiv_lock:
+                self.aktiv -= 1
+            self.letzter_kontakt = time.monotonic()
+
+    def _warten_bis_frei(self, hoechstens=600):
+        ende = time.monotonic() + hoechstens
+        while self.aktiv and time.monotonic() < ende:
+            time.sleep(0.5)
+
     def neu_starten(self):
-        """Nach einem Update: die neue exe starten, diese hier beenden."""
+        """Nach einem Update: die neue exe starten, diese hier beenden -
+        erst, wenn keine andere Aktion mehr läuft."""
         time.sleep(1)
+        self._warten_bis_frei()
         try:
             # eigenständig starten (nicht den entpackten Ordner dieses Prozesses mitbenutzen)
             subprocess.Popen([sys.executable], close_fds=True, env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
@@ -1987,10 +2080,11 @@ class Server:
             self.httpd.shutdown()
 
     def waechter(self):
-        # ohne Konsolenfenster: beenden, wenn die Seite 3 Minuten nichts meldet
+        # ohne Konsolenfenster: beenden, wenn die Seite 3 Minuten nichts meldet -
+        # nie mitten in einer laufenden Aktion
         while True:
             time.sleep(15)
-            if time.time() - self.letzter_kontakt > 180:
+            if not self.aktiv and time.monotonic() - self.letzter_kontakt > 180:
                 self.httpd.shutdown()
                 return
 
@@ -2167,7 +2261,7 @@ Version __VERSION__ <button class="zweit" id="beenden">Beenden</button></div></h
   <div><label for="b-regel">Welche Dateien werden signiert?</label><select id="b-regel">
    <option value="speedrace">Speedrace-Dashboard (nur Dateien, die ein Update übernimmt)</option>
    <option value="alle">Alle Dateien außer Ausnahmen</option></select></div></div>
-  <div class="zeile"><div><label for="b-repo">GitHub-Repository (Besitzer/Name)</label><input id="b-repo" placeholder="z. B. Hansi478/live-Ergebnisse"></div>
+  <div class="zeile"><div><label for="b-repo">GitHub-Repository (Besitzer/Name)</label><input id="b-repo" placeholder="Besitzer/Name"></div>
   <div><label for="b-zweig">Zweig</label><input id="b-zweig" value="main"></div></div>
   <div id="b-aus-box"><label for="b-ausschluss">Ausnahmen (eine je Zeile, z. B. <span class="mono">*.log</span> oder <span class="mono">daten/*</span>); .git, __pycache__ und SIGNATUR.json sind immer ausgenommen</label>
   <textarea id="b-ausschluss"></textarea></div>
@@ -2284,7 +2378,8 @@ function zeichnen() {
   });
   $("datenpfad").textContent = Z.daten || "";
   const ART = {dpapi: "mit Windows-DPAPI verschlüsselt gespeichert", schluesselbund: "im Schlüsselbund des Betriebssystems gespeichert",
-    sitzung: "nur für diese Sitzung im Arbeitsspeicher (nicht dauerhaft)", klartext: "UNSICHER als Klartext gespeichert"};
+    sitzung: "nur für diese Sitzung im Arbeitsspeicher (nicht dauerhaft)", klartext: "UNSICHER als Klartext gespeichert",
+    unlesbar: "gespeichert, aber für diesen Windows-Benutzer NICHT lesbar (anderer PC/Benutzer oder Kennwort zurückgesetzt) – bitte neu eingeben"};
   const NEU = {dpapi: "Windows-DPAPI (dauerhaft)", schluesselbund: "Schlüsselbund des Betriebssystems (dauerhaft)", sitzung: "nur diese Sitzung (kein sicherer Speicher verfügbar)"};
   $("g-stand").textContent = (Z.token ? "✓ Token " + (ART[Z.token_speicher] || "gespeichert") + "." : "Noch kein Token gespeichert.")
     + " Neues Token wird gespeichert: " + (NEU[Z.token_methode] || "?") + ".";
@@ -2300,7 +2395,7 @@ function bearbeiten(p, vorlage) {
   p = p || {}; $("bearbeiten").classList.remove("versteckt"); $("b-status").className = "status";
   $("b-titel").textContent = p.id ? "Profil bearbeiten" : "Neues Profil";
   $("b-id").value = p.id || ""; $("b-name").value = p.name || (vorlage === "speedrace" ? "Speedrace-Dashboard" : "");
-  $("b-regel").value = p.regel || vorlage || "alle"; $("b-repo").value = p.repo != null ? p.repo : (vorlage === "speedrace" ? "Hansi478/live-Ergebnisse" : "");
+  $("b-regel").value = p.regel || vorlage || "alle"; $("b-repo").value = p.repo != null ? p.repo : "";
   $("b-zweig").value = p.zweig || "main"; $("b-ausschluss").value = (p.ausschluss || []).join("\n");
   $("b-aus-box").classList.toggle("versteckt", $("b-regel").value === "speedrace");
   $("b-schluessel").classList.toggle("versteckt", !p.id);
@@ -2404,13 +2499,21 @@ $("p-ordner-los").onclick = e => mit("p-status", e.target, "Prüfe …", async (
   pruefErgebnis(await api("pruefen_ordner", {id: p.id, ordner: $("p-ordner").value})); });
 $("g-speichern").onclick = e => mit("g-status", e.target, "Speichere …", async () => {
   Z = await api("token_speichern", {token: $("g-token").value}); $("g-token").value = ""; zeichnen(); status("g-status", "ok", "✅ " + esc(Z.meldung)); });
-$("g-entfernen").onclick = e => mit("g-status", e.target, "Entferne …", async () => {
-  Z = await api("token_speichern", {token: ""}); zeichnen(); status("g-status", "ok", "✅ " + esc(Z.meldung)); });
+$("g-entfernen").onclick = e => {
+  if (!confirm("Gespeichertes GitHub-Token wirklich entfernen? Es lässt sich nicht wiederherstellen (nur auf GitHub neu erzeugen).")) return;
+  mit("g-status", e.target, "Entferne …", async () => {
+    Z = await api("token_speichern", {token: "", entfernen: true}); zeichnen(); status("g-status", "ok", "✅ " + esc(Z.meldung)); });
+};
 $("g-migrieren").onclick = e => mit("g-status", e.target, "Übernehme …", async () => {
   Z = await api("token_migrieren"); zeichnen(); status("g-status", "ok", "✅ " + esc(Z.meldung)); });
-$("g-alt-weg").onclick = e => mit("g-status", e.target, "Entferne …", async () => {
-  Z = await api("token_speichern", {token: ""}); zeichnen(); status("g-status", "ok", "✅ " + esc(Z.meldung)); });
-$("beenden").onclick = async () => { try { await api("beenden"); } catch (e) {} document.body.innerHTML = '<main><div class="karte"><h2>Beendet</h2>Das Fenster kann geschlossen werden.</div></main>'; };
+$("g-alt-weg").onclick = e => {
+  if (!confirm("Das alte Token entfernen? Danach auf GitHub ein neues erzeugen und hier speichern.")) return;
+  mit("g-status", e.target, "Entferne …", async () => {
+    Z = await api("token_speichern", {token: "", entfernen: true}); zeichnen(); status("g-status", "ok", "✅ " + esc(Z.meldung)); });
+};
+$("beenden").onclick = async () => {
+  try { await api("beenden"); } catch (e) { if (!(e instanceof TypeError)) return alert(e.message); }   // TypeError: Server schon weg
+  document.body.innerHTML = '<main><div class="karte"><h2>Beendet</h2>Das Fenster kann geschlossen werden.</div></main>'; };
 setInterval(() => api("ping").catch(() => {}), 20000);
 function updateZeigen(d) {
   if (!d.neuer) return;

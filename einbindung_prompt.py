@@ -44,29 +44,36 @@ verlässt meinen Rechner nie. Deine Aufgabe ist, das Repository dafür vorzubere
 - Profilregel: „alle Dateien außer Ausnahmen“
 - Ausnahmen des Profils (zusätzlich zu den festen): {{AUSNAHMEN}}
 - Prüfmodul: `Pruefmodul/signatur_pruefen.py` aus `{{WERKZEUG_REPO}}`, Stand Tag
-  `v{{WERKZEUG_VERSION}}`, SHA-256 `{{PRUEFMODUL_SHA256}}`
+  `v{{WERKZEUG_VERSION}}`, SHA-256 `{{PRUEFMODUL_SHA256}}` (über den Inhalt mit LF-Zeilenenden:
+  vor dem Vergleich `\r\n` durch `\n` ersetzen – ein Windows-Checkout hat sonst CRLF)
 
 ## So signiert das Werkzeug (damit die Prüfung passt)
 
 1. Es lädt den Stand des Zweigs `{{ZWEIG}}` über die GitHub-API als Archiv (zipball).
 2. Die Version kommt aus der Datei `VERSION` im Wurzelordner (Inhalt `x.y.z`, gestrippt,
-   höchstens 40 Zeichen).
+   höchstens 40 Zeichen, UTF-8 **ohne BOM**). Fehlt sie oder ist sie ungültig, bricht das
+   Signieren ab.
 3. Signiert werden **alle Dateien** außer:
    - immer: {{STANDARD_AUSSCHLUSS}}
-   - die Ausnahmen des Profils (siehe oben; `fnmatch`-Muster auf den relativen Pfad oder
-     den Dateinamen, „ordner/*“ nimmt einen ganzen Ordner aus)
+   - die Ausnahmen des Profils (siehe oben): Muster wie `fnmatch.fnmatchcase` auf den
+     relativen Pfad oder den Dateinamen, Trenner `/`, **Groß-/Kleinschreibung zählt** (auf
+     jedem Betriebssystem); „ordner/*“ nimmt einen ganzen Ordner aus
 4. Prüfsumme je Datei: SHA-256 über den Inhalt. Bei Textdateien vorher `\r\n` → `\n`.
    Nicht umgewandelt werden Dateien mit Nullbyte und Dateien mit den Endungen
    `{{BINAER}}`.
 5. Signiert wird `json.dumps({"format": "{{FORMAT}}", "version": VERSION, "dateien": {Pfad: Prüfsumme}},
    sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")` mit Ed25519.
-6. `SIGNATUR.json` wird als eigener Commit auf `{{ZWEIG}}` hochgeladen, danach setzt das
-   Werkzeug den Tag `v<VERSION>` **genau auf diesen signierten Commit**. Ein vorhandener Tag
-   wird nie verschoben – gibt es `v<VERSION>` schon auf einem anderen Stand, bricht das
-   Signieren ab.
+6. `SIGNATUR.json` kommt in einem eigenen Commit **genau auf den geladenen Stand** (der Zweig
+   wird nur vorgespult; hat er sich zwischendurch geändert, bricht das Werkzeug ab). Danach
+   setzt das Werkzeug den Tag `v<VERSION>` **genau auf diesen signierten Commit**. Ein
+   vorhandener Tag wird nie verschoben: Gibt es `v<VERSION>` schon – auch auf dem noch
+   unsignierten Stand –, bricht das Signieren ab, **bevor** etwas hochgeladen wird.
 
 Pfade sind relativ und mit `/`. Verknüpfungen (Symlinks, Junctions), Sonderdateien und Pfade,
-die unter Windows gleich wären (Groß/Klein, Unicode-Normalform), sind Fehler.
+die unter Windows gleich wären (Groß/Klein, Unicode-Normalform), sind Fehler. Beim Laden von
+GitHub werden außerdem abgelehnt: unter Windows reservierte Namen (z. B. `aux.py`, `con.txt`),
+die Zeichen `<>:"|?*\`, Punkt oder Leerzeichen am Namensende, Pfade über 240 Zeichen, mehr
+als 32 Ordnerebenen, Dateien über 200 MB.
 
 ## Aufgaben
 
@@ -85,8 +92,11 @@ die unter Windows gleich wären (Groß/Klein, Unicode-Normalform), sind Fehler.
    - Kein privater Schlüssel, keine `.pem`-Datei ins Repository.
 
 2. **Prüfung einbauen**
-   - `signatur_pruefen.py` unverändert übernehmen und die SHA-256 gegen den Wert oben
-     prüfen. Weicht sie ab: anhalten und mir melden.
+   - `signatur_pruefen.py` unverändert übernehmen und die SHA-256 (mit LF-Zeilenenden, siehe
+     oben) gegen den Wert oben prüfen. Weicht sie ab: anhalten und mir melden.
+   - **Kompilierte Python-Dateien:** `__pycache__/` und `*.pyc` sind nicht signiert, Python
+     lädt sie aber. Das Prüfmodul lehnt sie deshalb ab (außer in ausgenommenen Ordnern). Vor
+     der Prüfung im zu prüfenden Ordner löschen; nie ungeprüfte `.pyc` ausliefern.
    - **Schlüssel einstellbar, aber geschützt.** Die Software soll auch von anderen Herausgebern
      mit eigenem Schlüssel genutzt werden können. Deshalb:
      - Der Schlüssel oben ist nur die **Voreinstellung**.
@@ -101,7 +111,8 @@ die unter Windows gleich wären (Groß/Klein, Unicode-Normalform), sind Fehler.
        damit ein Austausch auffällt.
      - Abschalten der Prüfung ist nicht vorgesehen.
    - Prüfen **bevor** eine neue Version installiert oder gestartet wird:
-     `pruefen(ordner, aktiver_schluessel, ausschluss=[…])`. Bei `SignaturFehler`: nichts installieren,
+     `pruefen(ordner, aktiver_schluessel, ausschluss=[…])`. Bei `SignaturFehler` (und jeder anderen
+     Ausnahme daraus): nichts installieren,
      verständliche Meldung, alte Version bleibt.
    - Zusätzlich vergleichen: Version laut Signatur == Inhalt von `VERSION` == gewählter Tag
      (ohne „v“). Sonst ablehnen.
@@ -112,7 +123,9 @@ die unter Windows gleich wären (Groß/Klein, Unicode-Normalform), sind Fehler.
    - Gültig signierter Testordner (eigener Test-Schlüssel, nie der echte) wird angenommen.
    - Ein per Umgebungsvariable/Admin-Einstellung gesetzter anderer Schlüssel wird verwendet;
      ein ungültiger Wert führt zur Ablehnung, nicht zu „ohne Prüfung“.
-   - Abgelehnt werden: veränderte, zusätzliche und fehlende Datei, fremder Schlüssel,
+   - Abgelehnt werden: `__pycache__/` bzw. `*.pyc` im zu prüfenden Ordner, eine Ausnahme mit
+     anderer Groß-/Kleinschreibung trifft nicht (z. B. `*.log` vs. `X.LOG`),
+     veränderte, zusätzliche und fehlende Datei, fremder Schlüssel,
      beschädigte `SIGNATUR.json`, Symlink im Bestand, Versionsabweichung Tag/`VERSION`.
    - Die Ausnahmen im Test genau wie im Profil.
 

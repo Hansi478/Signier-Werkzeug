@@ -1,0 +1,2 @@
+# Prüfmodul und Signaturregeln: immer mit LF auschecken (Prüfsumme im Prompt zur Einbindung)
+Pruefmodul/*.py text eol=lf

@@ -41,8 +41,8 @@ class EinbindungTests(unittest.TestCase):
         return W.aktion("einbindung_prompt", {"id": pr["id"]})
 
     def test_pruefmodul_pruefsumme_aktuell(self):
-        with open(os.path.join(WURZEL, "Pruefmodul", "signatur_pruefen.py"), "rb") as f:
-            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), W.PRUEFMODUL_SHA256,
+        with open(os.path.join(WURZEL, "Pruefmodul", "signatur_pruefen.py"), "rb") as f:   # LF wie im Prompt
+            self.assertEqual(hashlib.sha256(f.read().replace(b"\r\n", b"\n")).hexdigest(), W.PRUEFMODUL_SHA256,
                              "Prüfmodul geändert: PRUEFMODUL_SHA256 und ggf. die Vorlage anpassen")
 
     def test_regeln_wie_im_werkzeug_und_pruefmodul(self):

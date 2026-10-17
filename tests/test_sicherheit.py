@@ -386,7 +386,25 @@ class BestandTests(Basis):
         self.baum()
         pr = self.profil("alle", ["logs/*", "*.log", "appdata/*"])
         W.signieren(self.tmp, pr, "Test-Kennwort-123", "2.0.0")
+        # __pycache__ wird nicht signiert, aber geladen: Prüfmodul und Werkzeug lehnen ab
+        with self.assertRaisesRegex(P.SignaturFehler, "Kompilierte Python-Dateien"):
+            P.pruefen(self.tmp, pr["oeffentlich"], ["logs/*", "*.log", "appdata/*"])
+        self.assertIn("Kompilierte", W.pruefen(self.tmp, pr["oeffentlich"], "alle", ["logs/*", "*.log", "appdata/*"])["fehler"])
+        shutil.rmtree(os.path.join(self.tmp, "unter", "__pycache__"))
         self.assertEqual(P.pruefen(self.tmp, pr["oeffentlich"], ["logs/*", "*.log", "appdata/*"]), "2.0.0")
+        self.assertTrue(W.pruefen(self.tmp, pr["oeffentlich"], "alle", ["logs/*", "*.log", "appdata/*"])["ok"])
+
+    def test_ausnahmen_unterscheiden_gross_klein_ueberall(self):
+        """Gleiches Ergebnis unter Windows und Linux (fnmatchcase, „/“)."""
+        self.schreiben("a.txt", b"1")
+        self.schreiben("X/Notiz.LOG", b"2")
+        self.schreiben("Logs/b.txt", b"3")
+        self.schreiben("logs/c.txt", b"4")
+        aus = ["*.log", "logs/*"]
+        ist = W.dateiliste(self.tmp, "alle", aus)
+        self.assertEqual(sorted(ist), ["Logs/b.txt", "X/Notiz.LOG", "a.txt"])
+        self.assertEqual(ist, P._dateiliste(self.tmp, aus))
+        self.assertEqual(W.dateiliste(self.tmp, "alle", ["logs\\*"]), W.dateiliste(self.tmp, "alle", ["logs/*"]))
 
     def test_abweichungen_erkannt(self):
         self.baum()
@@ -396,6 +414,7 @@ class BestandTests(Basis):
         self.schreiben("neu.txt", b"zusatz")
         os.remove(os.path.join(self.tmp, "bild.png"))
         self.schreiben("unter/b.py", b"x = 2\n")
+        shutil.rmtree(os.path.join(self.tmp, "unter", "__pycache__"))
         r = W.pruefen(self.tmp, pr["oeffentlich"], "alle", aus)
         self.assertFalse(r["ok"])
         self.assertEqual(r["arten"], {"neu.txt": "zusätzlich", "bild.png": "fehlt", "unter/b.py": "verändert"})
@@ -648,7 +667,9 @@ class TokenTests(Basis):
             self.assertEqual(z["token_speicher"], "schluesselbund")
             self.assertNotIn(TOKEN, self.profile_text())
             self.assertEqual(W.geheim_lesen(W.profile_laden()["github_token"]), TOKEN)
-            W.aktion("token_speichern", {"token": ""})
+            with self.assertRaises(ValueError):   # leeres Feld löscht nicht versehentlich
+                W.aktion("token_speichern", {"token": ""})
+            W.aktion("token_speichern", {"token": "", "entfernen": True})
             self.assertEqual(kr.werte, {})
 
     def test_klartext_altbestand_migration(self):
@@ -707,7 +728,7 @@ class TagTests(unittest.TestCase):
                 name = pfad.rsplit("/", 1)[1]
                 if name in tags:
                     return {"object": tags[name]}
-                raise ValueError("nicht gefunden")
+                raise W.GitHubFehler("nicht gefunden", 404)
             if "/git/tags/" in pfad:
                 return {"object": {"type": "commit", "sha": "c" * 40}}
             return {}
@@ -719,9 +740,24 @@ class TagTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 W.github_tag_setzen("o/r", "t", "1.0.0", "b" * 40)
             with self.assertRaises(ValueError):
-                W.github_tag_frei("o/r", "t", "1.0.0", "b" * 40)
+                W.github_tag_frei("o/r", "t", "1.0.0", "b" * 40, False)
+            # Tag auf dem noch unsignierten Stand: Abbruch, wenn ein neuer Commit nötig wäre
+            with self.assertRaisesRegex(ValueError, "noch nicht signierten Stand"):
+                W.github_tag_frei("o/r", "t", "1.0.0", "a" * 40, True)
+            W.github_tag_frei("o/r", "t", "1.0.0", "a" * 40, False)   # schon signiert, Tag passt
+            W.github_tag_frei("o/r", "t", "1.0.1", "a" * 40, True)    # Tag gibt es noch nicht
+            for version in ("", "\ufeff1.0.0", "v1.0"):
+                with self.assertRaises(ValueError):
+                    W.github_tag_frei("o/r", "t", version, "a" * 40, True)
             self.assertEqual(W.github_tag_setzen("o/r", "t", "1.0.0", "a" * 40), "v1.0.0")
         self.assertFalse([a for a in aufrufe if a[0] in ("POST", "PATCH")])
+
+    def test_abfragefehler_gilt_nicht_als_kein_tag(self):
+        for fehler in (W.GitHubFehler("Keine Berechtigung", 403), W.GitHubFehler("GitHub-Fehler 502.", 502),
+                       ValueError("GitHub nicht erreichbar (URLError).")):
+            with self.subTest(fehler=fehler), mock.patch.object(W, "_gh", side_effect=fehler):
+                self.assertRaises(ValueError, W._tag_commit, "o/r", "t", "v1.0.0")
+                self.assertRaises(ValueError, W.github_tag_frei, "o/r", "t", "1.0.0", "a" * 40, True)
 
     def test_annotierter_tag(self):
         gh, _ = self.gh_mit({"v1.0.0": {"type": "tag", "sha": "d" * 40}})

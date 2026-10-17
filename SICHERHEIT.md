@@ -57,7 +57,8 @@ dieselbe Regel eigenständig um, und ein Test vergleicht beide.
 | Frage | Regel |
 |---|---|
 | Was gehört dazu? | **Regel „speedrace“:** genau die Einträge aus `UPDATE_ALLOWED_FILES`/`UPDATE_ALLOWED_DIRS` der `app.py`, so wie ein Update des Dashboards sie übernimmt. **Regel „alle“:** alle Dateien des Ordners, rekursiv. |
-| Was ist ausdrücklich ausgenommen? | `SIGNATUR.json`. Bei „speedrace“ in den Ordnern `__pycache__/` und `*.pyc`, alle anderen Einträge der obersten Ebene gehören nicht zum Update. Bei „alle“: `.git/*`, `.github/*`, `__pycache__`, `*.pyc` und die Ausnahmen des Profils. Ordner, die über `…/*` ausgenommen sind, werden gar nicht betreten. |
+| Was ist ausdrücklich ausgenommen? | `SIGNATUR.json`. Bei „speedrace“ in den Ordnern `__pycache__/` und `*.pyc`, alle anderen Einträge der obersten Ebene gehören nicht zum Update. Bei „alle“: `.git/*`, `.github/*`, `__pycache__`, `*.pyc` und die Ausnahmen des Profils. Ausnahmen sind `fnmatchcase`-Muster mit `/` als Trenner (`\` wird als `/` gelesen): **Groß-/Kleinschreibung zählt auf jedem Betriebssystem**, damit die Windows-exe genau den Umfang signiert, den das Prüfmodul auf einem Linux-Server erwartet. Ordner, die über `…/*` ausgenommen sind, werden gar nicht betreten. |
+| Kompilierte Python-Dateien | `__pycache__/` und `*.pyc` werden nicht signiert, Python lädt sie aber (eine „unchecked-hash“-pyc ohne Abgleich mit der Quelle). Bei „alle“ lehnen Prüfmodul und „Prüfen“ sie deshalb ab, außer in ausgenommenen Ordnern. Der QNAP-Ablauf installiert keinen Stand, der welche enthält. |
 | Verbotene Typen | Symlinks, Windows-Junctions/Reparse-Points, FIFOs, Sockets, Geräte. Das ist ein **Fehler**, auch wenn der Eintrag unter eine Ausnahme fiele. Nichts wird stillschweigend übersprungen. |
 | Pfade | `/` als Trenner. `\` und Steuerzeichen sind verboten. Zwei Pfade, die unter Windows dieselbe Datei wären (Groß-/Kleinschreibung, Unicode-Normalform NFC), sind ein Fehler, ebenso Datei und Ordner gleichen Namens. |
 | Prüfen | Zusätzliche, fehlende und veränderte Dateien werden einzeln gemeldet. Eine Verknüpfung oder ein Sondertyp macht das Ergebnis immer ungültig. |
@@ -117,6 +118,18 @@ Für Profile „Speedrace-Dashboard“ gilt eine zweite, eigene Regel - genau wi
    (`dir_fd`), ein Austausch des Ordnerpfads lenkt also nichts um.
 5. Bei jedem Fehler wird die temporäre Datei entfernt, und der alte Stand
    bleibt erhalten.
+
+`SIGNATUR.json` und `SIGNATUR-BAU.json` gehören zusammen: Erst wird die
+Bau-Signatur geschrieben (alter Inhalt gemerkt), dann `SIGNATUR.json`;
+scheitert diese, wird die Bau-Signatur zurückgesetzt. Gibt es keine
+Bau-Dateien mehr, aber noch eine alte `SIGNATUR-BAU.json`, bricht das
+Signieren ab.
+
+`profile.json` und `qnap.json` werden nie still als leer gelesen: Ist eine
+davon beschädigt (kein gültiges JSON), meldet das Werkzeug das und schreibt
+nichts, bis sie repariert oder umbenannt ist. Sonst überschriebe das nächste
+Speichern alle Profile bzw. den gemerkten QNAP-Rückweg. Ein BOM am Anfang
+(z. B. im Editor gespeichert) ist erlaubt.
 
 Genauso exklusiv und ohne Symlinks zu folgen werden angelegt: neue private
 Schlüssel, übernommene Schlüssel (statt `shutil.copyfile`), `profile.json`
@@ -189,7 +202,7 @@ größte Datei 20 MB, Tiefe 3.
 
 | System | Speicher | Dauerhaft? |
 |---|---|---|
-| Windows (exe) | DPAPI (`CryptProtectData`), nur für diesen Windows-Benutzer lesbar, in `profile.json` als `dpapi:…` | ja |
+| Windows (exe) | DPAPI (`CryptProtectData`), nur für diesen Windows-Benutzer lesbar, in `profile.json` als `dpapi:…`. Ist es nicht lesbar (anderer PC/Benutzer, Kennwort zurückgesetzt), zeigt das Werkzeug „nicht lesbar – neu eingeben“; alles ohne Token funktioniert weiter. | ja |
 | macOS/Linux mit Paket `keyring` und sicherem Backend (Schlüsselbund, Secret Service, KWallet) | Schlüsselbund des Betriebssystems, in `profile.json` nur der Vermerk `keyring:` | ja |
 | macOS/Linux ohne sicheren Speicher | nur im Arbeitsspeicher der laufenden Sitzung | **nein**, nach dem Neustart erneut eingeben |
 
@@ -197,7 +210,8 @@ Base64 ist keine Verschlüsselung. Das Werkzeug schreibt deshalb nie mehr
 Klartext. Ein Altbestand `klar:…` aus früheren Versionen wird erkannt und
 angezeigt, ohne das Token offenzulegen. Mit „Sicher speichern“ wandert er
 in DPAPI, den Schlüsselbund bzw. die Sitzung, mit „Entfernen“ wird er
-gelöscht. Unsichere keyring-Backends (Klartext, „fail“, „null“) werden nicht
+gelöscht. Entfernt wird ein Token nur über „Entfernen“ (mit Rückfrage) –
+„Speichern“ mit leerem Feld wird abgelehnt. Unsichere keyring-Backends (Klartext, „fail“, „null“) werden nicht
 benutzt.
 
 ## 6. Bau und Veröffentlichung (GitHub Actions)

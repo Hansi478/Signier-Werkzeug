@@ -61,9 +61,14 @@ Das Token im Werkzeug braucht für dieses Repository „Contents: Read and write
    Betriebssystems (Paket `keyring`) oder - ohne sicheren Speicher - nur für die Sitzung.
 
 Je Version: Reiter „Signieren“ → „Von GitHub laden, signieren und hochladen“. Das Werkzeug
-lädt `SIGNATUR.json` hoch und setzt den Tag `v<Version>` auf genau diesen Stand. Gibt es den
-Tag schon auf einem anderen Stand, bricht es ab, ohne etwas hochzuladen (eine veröffentlichte
-Version wird nie verändert): dann `VERSION` erhöhen. Archive mit unzulässigen Pfaden,
+lädt `SIGNATUR.json` (beim Dashboard zusammen mit `SIGNATUR-BAU.json`) in einem Commit genau
+auf den geladenen Stand hoch – hat sich der Zweig zwischendurch geändert, bricht es ab – und
+setzt den Tag `v<Version>` auf genau diesen Commit. Gibt es den Tag schon, auch auf dem noch
+unsignierten Stand, bricht es ab, **bevor** etwas hochgeladen wird (eine veröffentlichte
+Version wird nie verändert): dann `VERSION` erhöhen. Tags deshalb nie automatisch setzen
+lassen (kein Workflow dafür). `VERSION` muss `x.y.z` enthalten, ohne BOM. Lässt sich der Tag
+nach dem Hochladen nicht setzen, meldet das Werkzeug einen Fehler (nicht ✅) – dann einfach
+noch einmal signieren. Archive mit unzulässigen Pfaden,
 Verknüpfungen oder auffälliger Größe werden ganz abgelehnt.
 
 ### Bau-Signatur (`SIGNATUR-BAU.json`, ab Dashboard 1.8.8)
