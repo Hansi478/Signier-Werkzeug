@@ -396,11 +396,12 @@ class BestandTests(Basis):
 
     def test_ausnahmen_unterscheiden_gross_klein_ueberall(self):
         """Gleiches Ergebnis unter Windows und Linux (fnmatchcase, „/“)."""
+        # (keine zwei Ordner, die sich nur in Groß/Klein unterscheiden - Windows legt sie zusammen)
         self.schreiben("a.txt", b"1")
         self.schreiben("X/Notiz.LOG", b"2")
         self.schreiben("Logs/b.txt", b"3")
-        self.schreiben("logs/c.txt", b"4")
-        aus = ["*.log", "logs/*"]
+        self.schreiben("daten/c.txt", b"4")
+        aus = ["*.log", "logs/*", "daten/*"]
         ist = W.dateiliste(self.tmp, "alle", aus)
         self.assertEqual(sorted(ist), ["Logs/b.txt", "X/Notiz.LOG", "a.txt"])
         self.assertEqual(ist, P._dateiliste(self.tmp, aus))
