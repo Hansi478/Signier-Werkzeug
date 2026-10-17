@@ -1,0 +1,178 @@
+# -*- coding: utf-8 -*-
+"""Prompt zur Einbindung: Text für eine Sitzung, die eine andere Software
+(Profil „andere Software“) für das Signier-Werkzeug vorbereitet und dort die
+Signaturprüfung einbaut. Erzeugt je Profil im Reiter „Profile & Schlüssel“.
+
+PFLEGE: Ändert sich etwas, das für die Einbindung wichtig ist (Format,
+Dateiauswahl, Prüfsummen-Regel, Ablauf von Signieren/Hochladen/Tag, Prüfmodul,
+Empfehlungen zu Schlüssel und Tags), muss diese Vorlage im selben Commit
+angepasst werden. Regeln, die als Konstanten im Werkzeug stehen (Format,
+feste Ausnahmen, Binär-Endungen, Prüfsumme des Prüfmoduls), werden beim
+Erzeugen eingesetzt; tests/test_einbindung.py prüft das.
+
+Enthält nur den ÖFFENTLICHEN Schlüssel - kein Token, keinen privaten Schlüssel.
+"""
+import base64
+import hashlib
+
+VORLAGE = r"""# Prompt: Signaturprüfung mit dem Signier-Werkzeug einbinden
+
+> Erzeugt vom Signier-Werkzeug {{WERKZEUG_VERSION}} für das Profil „{{PROFILNAME}}“.
+> Vollständig in die Sitzung kopieren, die an **{{REPOSITORY}}** arbeitet. Antworten bitte
+> auf Deutsch, Anrede „du“. **Vor dem Programmieren:** Quelltext lesen und eine Tabelle mit
+> Plan, Risiken und Aufwand vorlegen. Die Versionsnummer vergebe ich.
+
+---
+
+## Ziel
+
+Die Software in `{{REPOSITORY}}` (Zweig `{{ZWEIG}}`) soll künftig nur Versionen annehmen,
+die ich mit dem Signier-Werkzeug signiert habe. Signiert wird **nicht** in diesem Repository
+und **nicht** in dieser Sitzung, sondern von mir am eigenen Rechner im Signier-Werkzeug
+(Reiter „Signieren“ → „Von GitHub laden, signieren und hochladen“). Der private Schlüssel
+verlässt meinen Rechner nie. Deine Aufgabe ist, das Repository dafür vorzubereiten und die
+**Prüfung** in die Software einzubauen.
+
+## Feste Daten (nicht ändern, nicht raten)
+
+- Format: `{{FORMAT}}`, Signaturdatei `{{SIGNATUR_DATEI}}` im Wurzelordner
+- Öffentlicher Schlüssel des Herausgebers dieses Profils (Ed25519, Base64, 44 Zeichen) –
+  Voreinstellung, siehe Aufgabe 2:
+  `{{OEFFENTLICHER_SCHLUESSEL}}`
+- Fingerabdruck (SHA-256 des Schlüssels, zum Vergleich mit mir über einen zweiten Weg):
+  `{{FINGERABDRUCK}}`
+- Profilregel: „alle Dateien außer Ausnahmen“
+- Ausnahmen des Profils (zusätzlich zu den festen): {{AUSNAHMEN}}
+- Prüfmodul: `Pruefmodul/signatur_pruefen.py` aus `{{WERKZEUG_REPO}}`, Stand Tag
+  `v{{WERKZEUG_VERSION}}`, SHA-256 `{{PRUEFMODUL_SHA256}}`
+
+## So signiert das Werkzeug (damit die Prüfung passt)
+
+1. Es lädt den Stand des Zweigs `{{ZWEIG}}` über die GitHub-API als Archiv (zipball).
+2. Die Version kommt aus der Datei `VERSION` im Wurzelordner (Inhalt `x.y.z`, gestrippt,
+   höchstens 40 Zeichen).
+3. Signiert werden **alle Dateien** außer:
+   - immer: {{STANDARD_AUSSCHLUSS}}
+   - die Ausnahmen des Profils (siehe oben; `fnmatch`-Muster auf den relativen Pfad oder
+     den Dateinamen, „ordner/*“ nimmt einen ganzen Ordner aus)
+4. Prüfsumme je Datei: SHA-256 über den Inhalt. Bei Textdateien vorher `\r\n` → `\n`.
+   Nicht umgewandelt werden Dateien mit Nullbyte und Dateien mit den Endungen
+   `{{BINAER}}`.
+5. Signiert wird `json.dumps({"format": "{{FORMAT}}", "version": VERSION, "dateien": {Pfad: Prüfsumme}},
+   sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")` mit Ed25519.
+6. `SIGNATUR.json` wird als eigener Commit auf `{{ZWEIG}}` hochgeladen, danach setzt das
+   Werkzeug den Tag `v<VERSION>` **genau auf diesen signierten Commit**. Ein vorhandener Tag
+   wird nie verschoben – gibt es `v<VERSION>` schon auf einem anderen Stand, bricht das
+   Signieren ab.
+
+Pfade sind relativ und mit `/`. Verknüpfungen (Symlinks, Junctions), Sonderdateien und Pfade,
+die unter Windows gleich wären (Groß/Klein, Unicode-Normalform), sind Fehler.
+
+## Aufgaben
+
+1. **Repository vorbereiten**
+   - Datei `VERSION` im Wurzelordner anlegen bzw. beibehalten (nur `x.y.z`).
+   - **Keine Tags `v<Version>` automatisch setzen** (keinen Workflow, kein Skript dafür).
+     Tags setzt ausschließlich das Signier-Werkzeug nach dem Signieren. Einen vorhandenen
+     Workflow dieser Art entfernen und das berichten.
+   - Keine symbolischen Links und keine Submodule im signierten Bestand.
+   - In `.gitattributes` kein `export-ignore` und kein `export-subst` für Dateien, die zum
+     Bestand gehören (das GitHub-Archiv würde sonst vom Repository abweichen).
+   - Dateien, die erst zur Laufzeit entstehen (Logs, Einstellungen, Daten), dürfen im
+     installierten Programmordner nicht zwischen den signierten Dateien liegen – oder sie
+     müssen als Ausnahme im Profil stehen. Liste mir alle Kandidaten auf, damit ich die
+     Ausnahmen im Werkzeug eintrage. Keine Ausnahmen selbst erfinden.
+   - Kein privater Schlüssel, keine `.pem`-Datei ins Repository.
+
+2. **Prüfung einbauen**
+   - `signatur_pruefen.py` unverändert übernehmen und die SHA-256 gegen den Wert oben
+     prüfen. Weicht sie ab: anhalten und mir melden.
+   - **Schlüssel einstellbar, aber geschützt.** Die Software soll auch von anderen Herausgebern
+     mit eigenem Schlüssel genutzt werden können. Deshalb:
+     - Der Schlüssel oben ist nur die **Voreinstellung**.
+     - Ersetzen lässt er sich **nur durch den Betreiber der Installation**: über eine
+       Umgebungsvariable (z. B. `<PROGRAMM>_SIGNATUR_SCHLUESSEL`) oder eine Einstellung, die
+       nur ein Admin ändern kann.
+     - **Nie** aus einer Datei, die mit einem Update kommt oder im Programmordner liegt. Sonst
+       könnte ein manipuliertes Update seinen eigenen Schlüssel mitbringen.
+     - Format prüfen: Base64, genau 32 Bytes. Bei ungültigem Wert nichts installieren,
+       nicht stillschweigend auf „ohne Prüfung“ fallen.
+     - Den aktiven Schlüssel samt Fingerabdruck sichtbar anzeigen (z. B. Einstellungen/Systemcheck),
+       damit ein Austausch auffällt.
+     - Abschalten der Prüfung ist nicht vorgesehen.
+   - Prüfen **bevor** eine neue Version installiert oder gestartet wird:
+     `pruefen(ordner, aktiver_schluessel, ausschluss=[…])`. Bei `SignaturFehler`: nichts installieren,
+     verständliche Meldung, alte Version bleibt.
+   - Zusätzlich vergleichen: Version laut Signatur == Inhalt von `VERSION` == gewählter Tag
+     (ohne „v“). Sonst ablehnen.
+   - Versionen über Tags `v<x.y.z>` laden (nicht über den Zweig), damit genau der signierte
+     Stand kommt.
+
+3. **Tests**
+   - Gültig signierter Testordner (eigener Test-Schlüssel, nie der echte) wird angenommen.
+   - Ein per Umgebungsvariable/Admin-Einstellung gesetzter anderer Schlüssel wird verwendet;
+     ein ungültiger Wert führt zur Ablehnung, nicht zu „ohne Prüfung“.
+   - Abgelehnt werden: veränderte, zusätzliche und fehlende Datei, fremder Schlüssel,
+     beschädigte `SIGNATUR.json`, Symlink im Bestand, Versionsabweichung Tag/`VERSION`.
+   - Die Ausnahmen im Test genau wie im Profil.
+
+4. **Doku:** Ablauf je Version in die README:
+   `VERSION erhöhen → committen und nach {{ZWEIG}} pushen → im Signier-Werkzeug signieren
+   (lädt SIGNATUR.json hoch, setzt v<Version>) → erst dann verteilen.`
+
+## Grenzen
+
+- Nicht signieren, keine `SIGNATUR.json` selbst schreiben oder ändern, keine Tags anlegen,
+  verschieben oder löschen.
+- `.github/` gehört nicht zum signierten Bestand. Wenn Workflows etwas ausliefern
+  (Releases, Images), mir das melden – dafür bräuchte es eine eigene Lösung.
+- Keine echten Namen, Adressen, Hosts oder Pfade in Quelltext, Vorlagen oder Tests.
+- Keine neuen Abhängigkeiten außer `cryptography`.
+
+## Am Ende melden
+
+- Commit auf `{{ZWEIG}}` und die Version in `VERSION`
+- dass für diese Version noch **kein** Tag existiert
+- die Liste möglicher Ausnahmen (Laufzeitdateien)
+- Ergebnis der Tests
+"""
+
+
+def fingerabdruck(oeffentlich):
+    fp = hashlib.sha256(base64.b64decode(oeffentlich, validate=True)).hexdigest().upper()
+    return " ".join(fp[i:i + 4] for i in range(0, 64, 4))
+
+
+def _code(text):
+    return "`" + str(text).replace("`", "'").replace("\n", " ").replace("\r", " ") + "`"
+
+
+def erzeugen(profil, werte):
+    """profil: Profil des Werkzeugs (Name, Repository, Zweig, Ausnahmen,
+    öffentlicher Schlüssel). werte: Konstanten des Werkzeugs (VERSION, FORMAT,
+    SIGNATUR_DATEI, STANDARD_AUSSCHLUSS, BINAER, WERKZEUG_REPO, PRUEFMODUL_SHA256)."""
+    oeffentlich = str(profil.get("oeffentlich") or "")
+    if len(base64.b64decode(oeffentlich or "", validate=True)) != 32:
+        raise ValueError("Das Profil hat noch keinen gültigen öffentlichen Schlüssel.")
+    ausnahmen = [a for a in profil.get("ausschluss") or [] if str(a).strip()]
+    felder = {
+        "WERKZEUG_VERSION": werte["VERSION"],
+        "WERKZEUG_REPO": werte["WERKZEUG_REPO"],
+        "PROFILNAME": " ".join(str(profil.get("name") or "").split())[:60].replace("“", "\"").replace("„", "\""),
+        "REPOSITORY": str(profil.get("repo") or "") or "<Besitzer/Name>",
+        "ZWEIG": str(profil.get("zweig") or "main"),
+        "OEFFENTLICHER_SCHLUESSEL": oeffentlich,
+        "FINGERABDRUCK": fingerabdruck(oeffentlich),
+        "AUSNAHMEN": ", ".join(_code(a) for a in ausnahmen) if ausnahmen else "keine",
+        "FORMAT": werte["FORMAT"],
+        "SIGNATUR_DATEI": werte["SIGNATUR_DATEI"],
+        "STANDARD_AUSSCHLUSS": ", ".join(_code(a) for a in werte["STANDARD_AUSSCHLUSS"]),
+        "BINAER": " ".join(werte["BINAER"]),
+        "PRUEFMODUL_SHA256": werte["PRUEFMODUL_SHA256"],
+    }
+    text = VORLAGE
+    for k, v in felder.items():
+        text = text.replace("{{" + k + "}}", str(v))
+    if "{{" in text:
+        raise ValueError("Vorlage unvollständig ausgefüllt.")
+    return text

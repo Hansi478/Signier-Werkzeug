@@ -116,7 +116,11 @@ Abschnitt 7.
 ## Andere Software
 
 „+ Profil für andere Software“: eigener Name und Schlüssel, Regel „Alle Dateien außer
-Ausnahmen“. Die Software prüft mit `Pruefmodul/signatur_pruefen.py` - mit genau derselben
+Ausnahmen“. **Prompt zur Einbindung** (im Profil, sobald es einen Schlüssel hat): erzeugt einen
+Text für eine Sitzung, die das Repository dieser Software vorbereitet und dort die Prüfung
+einbaut – mit öffentlichem Schlüssel, Fingerabdruck, Ausnahmen, Regeln und Ablauf (kein Token,
+kein privater Schlüssel). Der Schlüssel ist in der Software nur Voreinstellung und lässt sich
+vom Betreiber ersetzen, nie aus einer Datei, die mit einem Update kommt. Die Software prüft mit `Pruefmodul/signatur_pruefen.py` - mit genau derselben
 Regel wie beim Signieren: zusätzliche, fehlende und veränderte Dateien sind Fehler,
 Verknüpfungen (Symlinks) und Sondertypen ebenfalls.
 

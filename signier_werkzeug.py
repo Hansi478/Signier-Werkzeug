@@ -41,6 +41,7 @@ import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+import einbindung_prompt
 import qnap_begleiter as Q
 
 PROGRAMM = "Signier-Werkzeug"
@@ -59,6 +60,9 @@ _TAG_VERSION_RE = re.compile(r"^[0-9][0-9A-Za-z._-]{0,38}$")
 WERKZEUG_REPO = "Hansi478/signier-werkzeug"
 WERKZEUG_SCHLUESSEL = "7OhcbQl3LZIM488s+WIDQMr4YhQmGd4dgyxRgun5XAc="
 EXE_NAME = "Signier-Werkzeug.exe"
+# SHA-256 von Pruefmodul/signatur_pruefen.py dieses Stands - steht im Prompt zur
+# Einbindung (die Sitzung vergleicht damit); tests/test_einbindung.py prüft sie
+PRUEFMODUL_SHA256 = "0a30d9f5fda8757147da65bc7c81f9f26c3d020610069609a7a94e123a171966"
 _VERSION_RE = re.compile(r"^(\d{1,4})\.(\d{1,4})\.(\d{1,4})$")
 _EXE_MIN, _EXE_MAX = 5 * 1024 * 1024, 150 * 1024 * 1024
 MB = 1024 * 1024
@@ -1790,6 +1794,17 @@ def aktion(name, p):
             d["github_token"] = geheim_speichern(t)
             profile_speichern(d)
             return {**_ansicht(d), "meldung": "Altes Klartext-Token übernommen: " + _token_meldung(d)}
+        if name == "einbindung_prompt":
+            pr = _profil(d, p.get("id"))
+            if pr.get("regel") == "speedrace":
+                raise ValueError("Für das Speedrace-Dashboard gelten eigene Regeln (SIGNATUR.json und SIGNATUR-BAU.json) - "
+                                 "der Prompt zur Einbindung ist für Profile „andere Software“.")
+            text = einbindung_prompt.erzeugen(pr, {
+                "VERSION": VERSION, "FORMAT": FORMAT, "SIGNATUR_DATEI": SIGNATUR_DATEI,
+                "STANDARD_AUSSCHLUSS": STANDARD_AUSSCHLUSS, "BINAER": BINAER, "WERKZEUG_REPO": WERKZEUG_REPO,
+                "PRUEFMODUL_SHA256": PRUEFMODUL_SHA256})
+            datei = "Prompt_Einbindung_" + (re.sub(r"[^A-Za-z0-9_-]+", "_", str(pr.get("name") or "")).strip("_")[:40] or "Profil") + ".md"
+            return {"text": text, "datei": datei}
         if name == "ordner_waehlen":
             return {"pfad": ordner_waehlen()}
         if name == "datei_waehlen":
@@ -2052,6 +2067,12 @@ def _sicherheit_selbsttest(tmp):
             fehler.append(f"qnap:{wert!r} angenommen")
         except ValueError:
             pass
+    try:   # Prompt zur Einbindung (Modul in der exe, Vorlage vollständig)
+        einbindung_prompt.erzeugen({"name": "Probe", "oeffentlich": WERKZEUG_SCHLUESSEL}, {
+            "VERSION": VERSION, "FORMAT": FORMAT, "SIGNATUR_DATEI": SIGNATUR_DATEI, "STANDARD_AUSSCHLUSS": STANDARD_AUSSCHLUSS,
+            "BINAER": BINAER, "WERKZEUG_REPO": WERKZEUG_REPO, "PRUEFMODUL_SHA256": PRUEFMODUL_SHA256})
+    except (ValueError, KeyError) as e:
+        fehler.append(f"einbindung: {e}")
     for arg in ("a%PATH%", "a!b", 'a"b'):
         try:
             Q.befehlszeile([arg])
@@ -2158,7 +2179,14 @@ Version __VERSION__ <button class="zweit" id="beenden">Beenden</button></div></h
     <div class="zeile" style="margin-top:12px"><div><label for="b-pfad">… oder vorhandenen Schlüssel übernehmen (.pem)</label><input id="b-pfad"></div>
     <button class="zweit" id="b-pfad-waehlen">Datei wählen…</button></div>
     <div class="zeile"><div><label for="b-pfad-kw">Kennwort dieses Schlüssels</label><input id="b-pfad-kw" type="password" autocomplete="off"></div><button class="zweit" id="b-import">Übernehmen</button></div></div>
-  </div><div class="status" id="b-status"></div></div>
+  </div>
+  <div id="b-einbindung" class="versteckt" style="margin-top:16px;border-top:1px solid var(--rand);padding-top:12px">
+   <h2>Prompt zur Einbindung</h2><div class="hinweis">Text für eine Sitzung, die diese Software vorbereitet und dort die
+   Signaturprüfung einbaut. Enthält nur den öffentlichen Schlüssel dieses Profils (kein Token, keinen privaten Schlüssel).</div>
+   <div class="zeile" style="margin-top:8px"><button class="zweit" id="b-prompt">Prompt erzeugen</button>
+   <button class="zweit versteckt" id="b-prompt-kopieren">Kopieren</button><button class="zweit versteckt" id="b-prompt-speichern">Als .md speichern</button></div>
+   <textarea id="b-prompt-text" class="versteckt" readonly style="min-height:260px;margin-top:8px"></textarea></div>
+  <div class="status" id="b-status"></div></div>
  <div class="karte"><h2>Sicherung</h2><div class="hinweis">Die privaten Schlüssel liegen (mit Kennwort verschlüsselt) in <span class="mono" id="datenpfad"></span>\schluessel.
   Diesen Ordner zusätzlich auf einen USB-Stick kopieren und das Kennwort sicher aufbewahren. Ohne beides lässt sich nicht mehr signieren
   (dann neues Profil mit neuem Schlüssel anlegen und den neuen öffentlichen Schlüssel eintragen).</div>
@@ -2276,6 +2304,8 @@ function bearbeiten(p, vorlage) {
   $("b-zweig").value = p.zweig || "main"; $("b-ausschluss").value = (p.ausschluss || []).join("\n");
   $("b-aus-box").classList.toggle("versteckt", $("b-regel").value === "speedrace");
   $("b-schluessel").classList.toggle("versteckt", !p.id);
+  $("b-einbindung").classList.toggle("versteckt", !(p.id && p.hat_schluessel && p.regel !== "speedrace"));
+  ["b-prompt-text", "b-prompt-kopieren", "b-prompt-speichern"].forEach(id => $(id).classList.add("versteckt"));
   if (p.id) {
     $("b-ohne").classList.toggle("versteckt", !!p.hat_schluessel);
     $("b-schluessel-info").innerHTML = p.hat_schluessel
@@ -2286,6 +2316,19 @@ function bearbeiten(p, vorlage) {
   }
   $("bearbeiten").scrollIntoView({behavior: "smooth"});
 }
+let promptDatei = "Prompt_Einbindung.md";
+$("b-prompt").onclick = e => mit("b-status", e.target, "Erzeuge …", async () => {
+  const d = await api("einbindung_prompt", {id: $("b-id").value});
+  $("b-prompt-text").value = d.text; promptDatei = d.datei;
+  ["b-prompt-text", "b-prompt-kopieren", "b-prompt-speichern"].forEach(id => $(id).classList.remove("versteckt"));
+  status("b-status", "ok", "✅ Prompt erzeugt – kopieren oder speichern und in die Sitzung einfügen.");
+});
+$("b-prompt-kopieren").onclick = () => navigator.clipboard.writeText($("b-prompt-text").value).then(() => status("b-status", "ok", "✅ Kopiert."));
+$("b-prompt-speichern").onclick = () => {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([$("b-prompt-text").value], {type: "text/markdown;charset=utf-8"}));
+  a.download = promptDatei; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+};
 $("b-regel").onchange = () => $("b-aus-box").classList.toggle("versteckt", $("b-regel").value === "speedrace");
 $("neu-speedrace").onclick = () => bearbeiten(null, "speedrace");
 $("neu-allgemein").onclick = () => bearbeiten(null, "alle");
