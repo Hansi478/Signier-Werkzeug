@@ -74,6 +74,30 @@ Signaturen ohne Änderung. Getestet wurde das mit `_update_signatur_pruefen`
 (`app.py`) und `signatur_pruefen` (`tools/update_einspielen.py`) an einem
 echten Dashboard-Stand.
 
+### Bau-Signatur (SIGNATUR-BAU.json)
+
+Für Profile „Speedrace-Dashboard“ gilt eine zweite, eigene Regel - genau wie im Dashboard
+(`app.py`: `_bau_dateiliste`/`_bau_pruefung`, `tools/signieren.py`: `bau_dateiliste`):
+
+- Dateien: `Dockerfile`, `.dockerignore`, `docker-compose.yml` (soweit vorhanden) und alles
+  unter `tools/` und `.github/workflows/`, ohne `__pycache__/` und `*.pyc`. Verknüpfungen und
+  Sondertypen sind Fehler. Bei GitHub wird die Auswahl zusätzlich gegen den Git-Baum des
+  Commits geprüft: symbolische Links (120000) oder Submodule im Bau-Bereich brechen ab, und
+  die Dateien im Archiv müssen genau denen im Git-Baum entsprechen.
+- Prüfsumme: SHA-256, ohne Nullbyte vorher CRLF → LF, **keine** Ausnahmen nach Endung.
+- Signiert wird `{"format": "sr-bau-signatur-1", "version", "dateien"}` (JSON, sortiert,
+  ohne Leerzeichen) - ein eigenes Format, damit sich eine Update-Signatur nicht als
+  Bau-Signatur ausgeben lässt und umgekehrt. Derselbe Schlüssel wie für `SIGNATUR.json`.
+- Beide Dateien werden vor dem Schreiben gebildet (ein Fehler schreibt nichts) und gehen
+  über die Git-Data-API in **einem** Commit nach GitHub; der Zweig wird nur vorgespult
+  (`force: false`). Hat er sich zwischendurch geändert, wird abgebrochen.
+- Prüfen: Fehler bei ungültiger Signatur, Verknüpfungen oder einer veränderten signierten
+  Datei; nur Hinweis bei abweichender `docker-compose.yml` (wird vor Ort angepasst),
+  fehlenden oder zusätzlichen Dateien oder einer Signatur anderer Version.
+- Gegenprobe: `tests/test_bau_signatur.py` gegen eine Nachbildung von `_bau_pruefung`; mit
+  `SR_DASHBOARD_ORDNER=<entpackter Stand ab 1.8.8>` zusätzlich gegen das echte
+  `tools/signieren.py pruefen` und `app.py --bau-pruefen` (beide müssen 0 liefern).
+
 ## 3. SIGNATUR.json und andere Dateien schreiben
 
 `atomar_schreiben()` schreibt jede Datei so:
@@ -326,10 +350,14 @@ Der Bereich leitet SSH-Schritte auf einer QNAP an. Er ist bewusst eng gehalten:
   öffentlichen Schlüssel des gewählten Profils (Bestandsregel aus Abschnitt 2) und verlangt,
   dass Signatur und `VERSION` zum Tag passen. Daraus baut es eine neue ZIP mit genau einem
   Ordner. Auf der QNAP prüft `sha256sum -c` die Prüfsumme vor dem Entpacken.
-- **Grenze:** Die Signatur des Dashboards deckt nur die Dateien ab, die ein Update übernimmt.
-  `Dockerfile`, `docker-compose.yml` und `tools/` (Startskript, Updatehelfer) kommen aus
-  demselben Tag-Commit, sind aber nicht signiert. Das Werkzeug zeigt sie in Schritt „Version
-  laden und prüfen“ an.
+- **Bau-Dateien:** Ab Dashboard 1.8.8 prüft „Version laden und prüfen“ auch
+  `SIGNATUR-BAU.json` (Fehler oder andere Version: nicht installieren). Vor jedem Neubau prüft
+  der Schritt „Bau-Dateien prüfen“ auf der QNAP mit `app.py --bau-pruefen` (fest eingebauter
+  Schlüssel des Herausgebers). Vorher sucht `grep -c -- '--bau-pruefen' app.py`, ob das Programm
+  den Schalter kennt; bei 0 wird die Prüfung nur nach ausdrücklicher Bestätigung übersprungen.
+  Ergebnis 2 sperrt den Neubau (auch serverseitig), Ergebnis 1 nur nach Bestätigung.
+- **Grenze:** Ältere Versionen (vor 1.8.8) haben keine Bau-Signatur - dort bleiben
+  `Dockerfile`, `docker-compose.yml` und `tools/` unsigniert; das Werkzeug listet sie auf.
 - **Prüfen der Dashboard-Adresse:** nur GET, ohne Token, ohne Proxy, Weiterleitungen werden
   nicht verfolgt. Angezeigt wird nur der Statuscode.
 - **Daten:** Profil und Ablauf in `qnap.json`, Protokoll in `qnap-protokoll.txt` (Zeit,

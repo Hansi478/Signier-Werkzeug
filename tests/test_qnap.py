@@ -143,7 +143,7 @@ class BefehlTests(unittest.TestCase):
                 "geplant_kaputt": "programmordner.kaputt-20260101-1300"}
         erlaubt = {"'/share/BEISPIEL'", "'/share/BEISPIEL/programmordner'", "'programmordner'", "'programmordner.zip'",
                    "'programmordner.alt-20260101-1200'", "'programmordner.alt-20260101-1300'",
-                   "'programmordner.kaputt-20260101-1300'"}
+                   "'programmordner.kaputt-20260101-1300'", "'--bau-pruefen'", "'/share/BEISPIEL/programmordner/app.py'"}
         import re
         for sid, s in Q.SCHRITTE.items():
             if not s.get("befehl"):
@@ -155,7 +155,7 @@ class BefehlTests(unittest.TestCase):
                         continue
                     self.assertIn(teil, erlaubt, b)
                 for verboten in ("*", "?", "rm -f", "rm -rf", "Daten", "container-station-data", "$", "`", '"'):
-                    self.assertNotIn(verboten, b.replace("'" + "b" * 64, ""))
+                    self.assertNotIn(verboten, b.replace("'" + "b" * 64, "").replace("echo Ergebnis=$?;", ""))
                 if "rm -r" in b:
                     self.assertIn("rm -r -- 'programmordner.alt-20260101-1200'", b)
 
@@ -300,8 +300,11 @@ class ReihenfolgeTests(Ablauf):
         self.schritt("vorbereitung")
         self.schritt("verbindung", root="ja")
         self.schritt("werkzeuge", compose="plugin")
-        for sid in ("ordner", "zustand", "bauen"):
+        for sid in ("ordner", "zustand"):
             self.schritt(sid)
+        self.schritt("bau_vorpruefung", treffer="mehr")
+        self.schritt("bau_pruefen", bauergebnis="0")
+        self.schritt("bauen")
         v = self.b.vorbereiten("starten")
         self.assertEqual(v["bestaetigung"], "veranstaltung")
         self.assertRaises(ValueError, self.b.ausfuehren, "starten", v["marke"], {"bestaetigt": True})
@@ -344,7 +347,10 @@ class InstallierenTests(Ablauf):
         self.b.rueckmelden("beiseite", "geklappt", {})
         alt = self.b.ansicht()["alt"]
         self.assertRegex(alt, r"^programmordner\.alt-\d{8}-\d{4}$")
-        for sid in ("entpacken", "bauen", "starten", "kontrolle"):
+        self.schritt("entpacken")
+        self.schritt("bau_vorpruefung", treffer="mehr")
+        self.schritt("bau_pruefen_run", bauergebnis="0")
+        for sid in ("bauen", "starten", "kontrolle"):
             self.schritt(sid)
         v = self.b.vorbereiten("alt_loeschen")
         self.assertEqual(v["befehl"], f"cd '/share/BEISPIEL' && sudo rm -r -- '{alt}' && ls -la")
@@ -361,7 +367,7 @@ class InstallierenTests(Ablauf):
         scp = [z for z in self.gestartet if "scp.exe" in z]
         self.assertEqual(len(scp), 1)
         self.assertIn('"admin-benutzer@192.0.2.10:/share/BEISPIEL/programmordner.zip"', scp[0])
-        self.assertEqual(len(self.gestartet), 12)   # jeder SSH-/scp-Schritt einzeln
+        self.assertEqual(len(self.gestartet), 14)   # jeder SSH-/scp-Schritt einzeln
 
     def test_version_nur_tag(self):
         self.b.beginnen("installieren")
@@ -411,6 +417,87 @@ class InstallierenTests(Ablauf):
 
     def test_zurueck_ohne_alt_ordner(self):
         self.assertRaises(ValueError, self.b.beginnen, "zurueck")
+
+
+class BauPruefungTests(Ablauf):
+    def bis_vorpruefung(self, ablauf="neubau"):
+        self.b.beginnen(ablauf)
+        self.schritt("vorbereitung")
+        self.schritt("verbindung", root="nein")
+        self.schritt("werkzeuge", compose="plugin")
+        self.schritt("ordner")
+        self.schritt("zustand")
+
+    def test_befehle(self):
+        pr = profil(root_wert=False)
+        self.assertEqual(Q.SCHRITTE["bau_vorpruefung"]["befehl"](pr, {}, {}, False),
+                         "grep -c -- '--bau-pruefen' '/share/BEISPIEL/programmordner/app.py'")
+        self.assertEqual(Q.SCHRITTE["bau_pruefen"]["befehl"](pr, {}, {}, False),
+                         "cd '/share/BEISPIEL/programmordner' && { sudo docker compose exec dashboard python app.py "
+                         "--bau-pruefen; echo Ergebnis=$?; }")
+        pr = profil(root_wert=True, compose="standalone")
+        self.assertEqual(Q.SCHRITTE["bau_pruefen_run"]["befehl"](pr, {}, {}, False),
+                         "cd '/share/BEISPIEL/programmordner' && { docker-compose run --rm --no-deps --entrypoint python "
+                         "dashboard app.py --bau-pruefen; echo Ergebnis=$?; }")
+        # durch cmd.exe (Windows-Befehlszeile) unverändert
+        prog, zeile = Q.befehlszeile(Q.ssh_argv(pr, Q.SCHRITTE["bau_pruefen"]["befehl"](pr, {}, {}, False), PROG), PROG)
+        self.assertIn('"cd \'/share/BEISPIEL/programmordner\' && { docker-compose exec dashboard python app.py '
+                      '--bau-pruefen; echo Ergebnis=$?; }""', zeile)
+
+    def test_reihenfolge_vor_dem_neubau(self):
+        for ablauf, pruef in (("neubau", "bau_pruefen"), ("installieren", "bau_pruefen_run")):
+            ids = [s["id"] for s in Q._schritte(ablauf)]
+            self.assertEqual(ids[ids.index("bauen") - 2:ids.index("bauen")], ["bau_vorpruefung", pruef])
+
+    def test_vorpruefung_null_nur_mit_bestaetigung(self):
+        self.bis_vorpruefung()
+        v = self.b.vorbereiten("bau_vorpruefung")
+        self.b.ausfuehren("bau_vorpruefung", v["marke"], {"bestaetigt": True})
+        self.assertRaises(ValueError, self.b.rueckmelden, "bau_vorpruefung", "geklappt", {})
+        self.assertRaises(ValueError, self.b.rueckmelden, "bau_vorpruefung", "geklappt", {"treffer": "0"})
+        self.assertRaises(ValueError, self.b.rueckmelden, "bau_vorpruefung", "uebersprungen", {})
+        n = len(self.gestartet)
+        d = self.b.rueckmelden("bau_vorpruefung", "geklappt", {"treffer": "0", "ohne_pruefung": True})
+        st = {s["id"]: s["status"] for s in d["schritte"]}
+        self.assertEqual(st["bau_pruefen"], "uebersprungen")   # app.py wird gar nicht aufgerufen
+        self.assertEqual(len(self.gestartet), n)
+        self.b.vorbereiten("bauen")
+        self.assertIn("Programm älter als 1.8.8", self.protokoll())
+
+    def test_ergebnis_2_sperrt(self):
+        self.bis_vorpruefung()
+        self.schritt("bau_vorpruefung", treffer="mehr")
+        v = self.b.vorbereiten("bau_pruefen")
+        self.b.ausfuehren("bau_pruefen", v["marke"], {"bestaetigt": True})
+        self.assertRaises(ValueError, self.b.rueckmelden, "bau_pruefen", "geklappt", {"bauergebnis": "2"})
+        self.assertRaises(ValueError, self.b.rueckmelden, "bau_pruefen", "geklappt", {})
+        d = self.b.rueckmelden("bau_pruefen", "fehler", {"bauergebnis": "2"})
+        self.assertTrue(any("neu holen, nicht bauen" in f[1] for f in d["hilfe"]))
+        self.assertRaises(ValueError, self.b.vorbereiten, "bauen")
+        self.assertIn("Ergebnis=2", self.protokoll())
+        # nach dem Neuholen: Wiederholung mit 0 gibt den Neubau frei
+        self.schritt("bau_pruefen", bauergebnis="0")
+        self.b.vorbereiten("bauen")
+
+    def test_sperre_auch_direkt(self):
+        self.bis_vorpruefung()
+        self.schritt("bau_vorpruefung", treffer="mehr")
+        z = self.zustand
+        z["lauf"]["bau_gesperrt"] = True
+        z["lauf"]["index"] += 1   # selbst wenn die Reihenfolge umgangen würde
+        self._speichern(z)
+        self.assertRaises(ValueError, self.b.vorbereiten, "bauen")
+
+    def test_ergebnis_1_nur_nach_bestaetigung(self):
+        self.bis_vorpruefung()
+        self.schritt("bau_vorpruefung", treffer="mehr")
+        v = self.b.vorbereiten("bau_pruefen")
+        self.b.ausfuehren("bau_pruefen", v["marke"], {"bestaetigt": True})
+        self.assertRaises(ValueError, self.b.rueckmelden, "bau_pruefen", "geklappt", {"bauergebnis": "1"})
+        self.assertRaises(ValueError, self.b.vorbereiten, "bauen")
+        self.b.rueckmelden("bau_pruefen", "geklappt", {"bauergebnis": "1", "hinweis_bestaetigt": True})
+        self.b.vorbereiten("bauen")
+        self.assertIn("Ergebnis=1 (Hinweis bestätigt)", self.protokoll())
 
 
 class ProtokollTests(Ablauf):

@@ -44,7 +44,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import qnap_begleiter as Q
 
 PROGRAMM = "Signier-Werkzeug"
-VERSION = "1.2.5"
+VERSION = "1.2.6"
 FORMAT = "sr-signatur-1"
 SIGNATUR_DATEI = "SIGNATUR.json"
 BINAER = (".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".otf")
@@ -469,6 +469,206 @@ def pruefen(wurzel, oeffentlich, regel="alle", ausschluss=None):
     return {"ok": not abweichend, "version": sig.get("version"), "anzahl": len(ist), "abweichend": abweichend[:50],
             "arten": {n: arten[n] for n in abweichend[:50]},
             "fehler": "Diese Dateien passen nicht zur Signatur." if abweichend else ""}
+
+
+# ---------------------------------------------------------------------------
+# Bau-Signatur (SIGNATUR-BAU.json) für das Speedrace-Dashboard ab 1.8.8:
+# die Dateien, aus denen das Docker-Image gebaut wird. Sie kommen nicht mit
+# einem Update aus dem Dashboard und dürfen deshalb nicht in SIGNATUR.json
+# stehen. Genau wie im Dashboard (app.py: _bau_dateiliste/_bau_pruefung,
+# tools/signieren.py: bau_dateiliste) - eigenes Format, damit sich eine
+# Signatur nicht als die andere ausgeben lässt.
+# ---------------------------------------------------------------------------
+BAU_SIGNATUR_DATEI = "SIGNATUR-BAU.json"
+BAU_FORMAT = "sr-bau-signatur-1"
+BAU_DATEIEN = ("Dockerfile", ".dockerignore", "docker-compose.yml")
+BAU_ORDNER = ("tools", ".github/workflows")
+BAU_NUR_WARNEN = ("docker-compose.yml",)   # wird vor Ort oft angepasst: Abweichung nur Hinweis
+
+
+def bau_pruefsumme_daten(daten):
+    """SHA-256; ohne Nullbyte vorher CRLF -> LF (keine Ausnahmen nach Endung)."""
+    if b"\0" not in daten:
+        daten = daten.replace(b"\r\n", b"\n")
+    return hashlib.sha256(daten).hexdigest()
+
+
+def bau_bereich(rel):
+    """Gehört der relative Pfad (mit /) zu den Bau-Dateien?"""
+    teile = rel.split("/")
+    if rel in BAU_DATEIEN:
+        return True
+    if not any(rel.startswith(o + "/") for o in BAU_ORDNER):
+        return False
+    return "__pycache__" not in teile and not rel.endswith(".pyc")
+
+
+def bau_dateiliste(wurzel):
+    """-> ({Pfad: Prüfsumme}, [unzulässige Einträge]) wie im Dashboard:
+    Verknüpfungen und Sonderdateien werden nicht verfolgt, sondern gemeldet."""
+    out, unzulaessig = {}, []
+
+    def art(rel):
+        try:
+            return _art(os.lstat(os.path.join(wurzel, *rel.split("/"))))
+        except OSError:
+            return "sonstiges"
+    for name in BAU_DATEIEN:
+        if os.path.lexists(os.path.join(wurzel, name)):
+            if art(name) == "datei":
+                out[name] = bau_pruefsumme_daten(regulaer_lesen(os.path.join(wurzel, name)))
+            else:
+                unzulaessig.append(name)
+
+    def durch(rel, tiefe):
+        if tiefe > _MAX_TIEFE:
+            unzulaessig.append(rel)
+            return
+        for name in sorted(os.listdir(os.path.join(wurzel, *rel.split("/")))):
+            r = rel + "/" + name
+            a = art(r)
+            if a == "ordner":
+                if name != "__pycache__":
+                    durch(r, tiefe + 1)
+            elif name == "__pycache__" or name.endswith(".pyc"):
+                continue
+            elif a == "datei":
+                out[r] = bau_pruefsumme_daten(regulaer_lesen(os.path.join(wurzel, *r.split("/"))))
+            else:
+                unzulaessig.append(r)
+    for ordner in BAU_ORDNER:
+        if not os.path.lexists(os.path.join(wurzel, *ordner.split("/"))):
+            continue
+        if art(ordner) != "ordner":
+            unzulaessig.append(ordner)
+            continue
+        durch(ordner, 1)
+    return out, unzulaessig
+
+
+def bau_nachricht(version, dateien):
+    return json.dumps({"format": BAU_FORMAT, "version": version, "dateien": dateien},
+                      sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def bau_aus_baum(eintraege):
+    """Git-Baum eines Commits (GitHub-API, rekursiv) -> Menge der Bau-Dateien.
+    Symbolische Links (120000) oder Submodule im Bau-Bereich: ValueError."""
+    pfade = set()
+    for e in eintraege:
+        rel, modus, typ = str(e.get("path") or ""), str(e.get("mode") or ""), str(e.get("type") or "")
+        betroffen = rel in BAU_DATEIEN or rel in BAU_ORDNER or any(rel.startswith(o + "/") for o in BAU_ORDNER)
+        if not betroffen:
+            continue
+        if modus == "120000" or modus == "160000" or typ == "commit":
+            art = "Submodul" if typ == "commit" or modus == "160000" else "symbolischer Link"
+            raise ValueError(f"Bau-Dateien nicht signierbar: {rel} ist ein {art} - abgebrochen, nichts hochgeladen.")
+        if typ == "blob" and bau_bereich(rel):
+            pfade.add(rel)
+    return pfade
+
+
+def bau_signatur_bauen(privat, version, dateien):
+    signatur = privat.sign(bau_nachricht(version, dateien))
+    return json.dumps({"format": BAU_FORMAT, "version": version, "dateien": dateien,
+                       "signatur": base64.b64encode(signatur).decode("ascii")}, indent=1, sort_keys=True) + "\n"
+
+
+def bau_pruefen(wurzel, oeffentlich):
+    """Wie _bau_pruefung im Dashboard -> {"stufe": ok|warn|fehler|fehlt, "text", …}.
+    fehler: Signatur ungültig, unzulässige Einträge oder eine signierte Datei (außer
+    docker-compose.yml) verändert. warn: nur docker-compose.yml angepasst, Dateien
+    fehlen, zusätzliche Dateien oder Signatur einer anderen Version."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    erg = {"stufe": "ok", "text": "", "veraendert": [], "fehlt_datei": [], "zusaetzlich": [], "version": "", "anzahl": 0}
+    pfad = os.path.join(wurzel, BAU_SIGNATUR_DATEI)
+    if not os.path.lexists(pfad):
+        erg.update(stufe="fehlt", text=f"{BAU_SIGNATUR_DATEI} fehlt – Bau-Dateien nicht signiert (ältere Version?).")
+        return erg
+    try:
+        sig = json.loads(regulaer_lesen(pfad, MAX_SIGNATUR_BYTES).decode("utf-8"))
+        if not isinstance(sig, dict) or sig.get("format") != BAU_FORMAT or not isinstance(sig.get("dateien"), dict) \
+                or not all(isinstance(k, str) and isinstance(v, str) for k, v in sig["dateien"].items()):
+            raise ValueError("Format")
+        version = str(sig.get("version") or "")[:40]
+        Ed25519PublicKey.from_public_bytes(base64.b64decode(oeffentlich, validate=True)).verify(
+            base64.b64decode(str(sig.get("signatur") or ""), validate=True), bau_nachricht(version, sig["dateien"]))
+    except (OSError, ValueError, TypeError, UnicodeDecodeError, InvalidSignature) as e:
+        erg.update(stufe="fehler", text=f"{BAU_SIGNATUR_DATEI} ungültig ({e.__class__.__name__}) – Bau-Dateien stammen "
+                                        "nicht vom Herausgeber oder wurden verändert.")
+        return erg
+    erg["version"] = version
+    ist, unzulaessig = bau_dateiliste(wurzel)
+    soll = sig["dateien"]
+    erg["veraendert"] = sorted(n for n in soll if n in ist and ist[n] != soll[n])
+    erg["fehlt_datei"] = sorted(n for n in soll if n not in ist)
+    erg["zusaetzlich"] = sorted(n for n in ist if n not in soll)
+    erg["anzahl"] = len(soll) - len(erg["fehlt_datei"])
+    hart = [n for n in erg["veraendert"] if n not in BAU_NUR_WARNEN]
+    teile = []
+    if unzulaessig:
+        teile.append("nicht prüfbar (Verknüpfung/Sonderdatei): " + ", ".join(unzulaessig[:6]))
+    if hart:
+        teile.append("verändert: " + ", ".join(hart[:6]))
+    if teile:
+        erg.update(stufe="fehler", text="Bau-Dateien passen nicht zur Signatur – " + "; ".join(teile) + ".")
+        return erg
+    hinweise = []
+    if [n for n in erg["veraendert"] if n in BAU_NUR_WARNEN]:
+        hinweise.append("docker-compose.yml weicht ab (lokal angepasst?)")
+    if erg["fehlt_datei"]:
+        hinweise.append("fehlen: " + ", ".join(erg["fehlt_datei"][:6]))
+    if erg["zusaetzlich"]:
+        hinweise.append("nicht signiert: " + ", ".join(erg["zusaetzlich"][:6]))
+    programm = ordner_version(wurzel)
+    if programm and version and programm != version:
+        hinweise.append(f"Signatur gehört zu Version {version}, Programm ist {programm}")
+    if hinweise:
+        erg.update(stufe="warn", text=f"Bau-Signatur gültig (Version {version}), {erg['anzahl']} Dateien geprüft – "
+                                      + "; ".join(hinweise) + ".")
+    else:
+        erg["text"] = f"Bau-Dateien signiert und unverändert (Version {version}, {erg['anzahl']} Dateien)."
+    return erg
+
+
+def signieren_mit_bau(wurzel, profil, kennwort, git_bau=None):
+    """Für Profile „Speedrace-Dashboard“: SIGNATUR.json wie `signieren` und dazu
+    SIGNATUR-BAU.json (gleicher Schlüssel, eine Kennworteingabe). Beide Listen
+    werden vor dem Schreiben gebildet - ein Fehler schreibt nichts.
+    git_bau: Bau-Dateien laut Git-Baum (bei GitHub), die Liste muss genau passen.
+    -> (Version, Anzahl, Inhalt, Bau-Inhalt oder None, Bau-Anzahl)"""
+    privat = privat_laden(schluessel_pfad(profil), kennwort)
+    if oeffentlich_text(privat) != profil.get("oeffentlich"):
+        raise ValueError("Der Schlüssel passt nicht zum öffentlichen Schlüssel des Profils.")
+    version = ordner_version(wurzel)[:40]
+    dateien = dateiliste(wurzel, profil.get("regel", "alle"), profil.get("ausschluss"))
+    if not dateien:
+        raise ValueError("Keine Dateien zum Signieren gefunden.")
+    bau, unzulaessig = bau_dateiliste(wurzel)
+    if unzulaessig:
+        raise ValueError("Bau-Dateien nicht signierbar (nur normale Dateien und Ordner erlaubt): "
+                         + ", ".join(unzulaessig[:10]) + " - nichts geschrieben.")
+    if git_bau is not None and set(bau) != set(git_bau):
+        raise ValueError("Bau-Dateien im Archiv und im Git-Baum weichen ab ("
+                         + ", ".join(sorted(set(bau) ^ set(git_bau))[:6]) + ") - nichts geschrieben.")
+    inhalt = json.dumps({"format": FORMAT, "version": version, "dateien": dateien,
+                         "signatur": base64.b64encode(privat.sign(nachricht(version, dateien))).decode("ascii")},
+                        indent=1, sort_keys=True) + "\n"
+    bau_inhalt = bau_signatur_bauen(privat, version, bau) if bau else None
+    oeffentlich = privat.public_key()
+
+    def bau_gegenprobe(b):
+        sig = json.loads(b.decode("utf-8"))
+        oeffentlich.verify(base64.b64decode(sig["signatur"]), bau_nachricht(sig["version"], sig["dateien"]))
+        if sig["dateien"] != bau or sig["version"] != version or sig["format"] != BAU_FORMAT:
+            raise ValueError("Geschriebene Bau-Signatur passt nicht - abgebrochen.")
+    if bau_inhalt:
+        bau_gegenprobe(bau_inhalt.encode("utf-8"))
+    atomar_schreiben(wurzel, SIGNATUR_DATEI, inhalt.encode("utf-8"), 0o644, _signatur_json_pruefen)
+    if bau_inhalt:
+        atomar_schreiben(wurzel, BAU_SIGNATUR_DATEI, bau_inhalt.encode("utf-8"), 0o644, bau_gegenprobe)
+    return version, len(dateien), inhalt, bau_inhalt, len(bau)
 
 
 # ---------------------------------------------------------------------------
@@ -939,6 +1139,55 @@ def github_hochladen(repo, zweig, token, inhalt, version, stand):
     return (d.get("commit") or {}).get("sha", "")
 
 
+def github_baum(repo, token, commit):
+    """Alle Einträge des Git-Baums eines Commits (rekursiv)."""
+    d = _gh(f"/repos/{repo}/git/trees/{commit}?recursive=1", token)
+    if not isinstance(d, dict) or not isinstance(d.get("tree"), list):
+        raise ValueError("Unerwartete Antwort von GitHub (Git-Baum).")
+    if d.get("truncated"):
+        raise ValueError("GitHub liefert den Git-Baum nur gekürzt - Bau-Dateien nicht sicher bestimmbar, abgebrochen.")
+    return d["tree"]
+
+
+def _git_blob_sha(daten):
+    return hashlib.sha1(b"blob %d\0" % len(daten) + daten).hexdigest()
+
+
+def github_hochladen_commit(repo, zweig, token, dateien, version, stand, baum):
+    """Mehrere Dateien (Name -> Text) in EINEM Commit auf den Stand `stand`
+    hochladen (Git-Data-API) und den Zweig vorspulen (ohne force) -> Commit.
+    Sind alle schon genau so vorhanden, gibt es keinen neuen Commit."""
+    if _zweig_stand(repo, zweig, token) != stand:
+        raise ValueError("Auf GitHub hat sich zwischendurch etwas geändert - bitte noch einmal signieren.")
+    vorhanden = {str(e.get("path")): str(e.get("sha")) for e in baum if e.get("type") == "blob"}
+    neu = {n: t.encode("utf-8") for n, t in dateien.items()}
+    if all(vorhanden.get(n) == _git_blob_sha(b) for n, b in neu.items()):
+        return stand
+    tree = (_gh(f"/repos/{repo}/git/commits/{stand}", token).get("tree") or {}).get("sha")
+    if not re.fullmatch(r"[0-9a-f]{40}", str(tree or "")):
+        raise ValueError("Unerwartete Antwort von GitHub (Commit).")
+    eintraege = []
+    for n, b in sorted(neu.items()):
+        blob = _gh(f"/repos/{repo}/git/blobs", token, "POST",
+                   {"content": base64.b64encode(b).decode("ascii"), "encoding": "base64"}).get("sha")
+        if blob != _git_blob_sha(b):
+            raise ValueError("GitHub hat eine Datei anders gespeichert als gesendet - abgebrochen.")
+        eintraege.append({"path": n, "mode": "100644", "type": "blob", "sha": blob})
+    neuer_baum = _gh(f"/repos/{repo}/git/trees", token, "POST", {"base_tree": tree, "tree": eintraege}).get("sha")
+    commit = _gh(f"/repos/{repo}/git/commits", token, "POST",
+                 {"message": f"SIGNATUR.json und {BAU_SIGNATUR_DATEI} für Version {version or '?'}",
+                  "tree": neuer_baum, "parents": [stand]}).get("sha")
+    if not re.fullmatch(r"[0-9a-f]{40}", str(commit or "")):
+        raise ValueError("Unerwartete Antwort von GitHub (neuer Commit).")
+    try:
+        _gh(f"/repos/{repo}/git/refs/heads/{urllib.parse.quote(zweig, safe='/')}", token, "PATCH",
+            {"sha": commit, "force": False})
+    except ValueError:
+        raise ValueError("Der Zweig ließ sich nicht vorspulen (zwischendurch geändert oder geschützt) - "
+                         "nichts veröffentlicht, bitte noch einmal signieren.") from None
+    return commit
+
+
 def _tag_commit(repo, token, name):
     """Commit, auf den der Tag zeigt (auch bei annotierten Tags), oder None."""
     try:
@@ -1387,6 +1636,12 @@ def qnap_paket(pr, token, tag, name, ziel):
         if str(r.get("version") or "") != version or ordner_version(ordner) != version:
             raise ValueError(f"{tag}: Version in SIGNATUR.json bzw. VERSION passt nicht zum Tag - nicht installieren.")
         signiert = set(json.loads(regulaer_lesen(os.path.join(ordner, SIGNATUR_DATEI), MAX_SIGNATUR_BYTES))["dateien"])
+        bau = bau_pruefen(ordner, pr.get("oeffentlich") or "") if pr.get("regel") == "speedrace" else {"stufe": "fehlt"}
+        if bau["stufe"] == "fehler":
+            raise ValueError(f"{tag}: {bau['text']} Nicht installieren.")
+        if bau["stufe"] != "fehlt" and bau["version"] != version:
+            raise ValueError(f"{tag}: Version in {BAU_SIGNATUR_DATEI} passt nicht zum Tag - nicht installieren.")
+        bau_signiert = set(bau_dateiliste(ordner)[0]) - set(bau["zusaetzlich"]) if bau["stufe"] != "fehlt" else set()
         eintraege = []
         _durchlaufen(ordner, "", lambda rel, n, ist_ordner: False, eintraege)
         dateien = sorted(rel for rel, _ in eintraege)
@@ -1405,9 +1660,11 @@ def qnap_paket(pr, token, tag, name, ziel):
                 zo.writestr(info, regulaer_lesen(os.path.join(ordner, *rel.split("/"))))
         daten = puffer.getvalue()
     atomar_schreiben(ziel, name + ".zip", daten, 0o600, _zip_gueltig)
-    unsigniert = [rel for rel in dateien if rel not in signiert and rel != SIGNATUR_DATEI]
+    unsigniert = [rel for rel in dateien if rel not in signiert and rel not in bau_signiert
+                  and rel not in (SIGNATUR_DATEI, BAU_SIGNATUR_DATEI)]
     return {"tag": tag, "version": version, "commit": commit, "zip": os.path.join(ziel, name + ".zip"),
             "sha256": hashlib.sha256(daten).hexdigest(), "dateien": len(dateien), "signiert": len(signiert),
+            "bau_signiert": len(bau_signiert), "bau_stufe": bau["stufe"], "bau_text": bau.get("text", ""),
             "unsigniert": unsigniert[:200], "unsigniert_anzahl": len(unsigniert)}
 
 
@@ -1576,34 +1833,61 @@ def aktion(name, p):
         ordner = str(p.get("ordner") or "").strip().strip('"')
         if not os.path.isdir(ordner):
             raise ValueError("Ordner nicht gefunden.")
-        version, anzahl, _ = signieren(ordner, pr, str(p.get("kennwort") or ""))
-        return {"meldung": f"SIGNATUR.json geschrieben: Version {version or '(ohne)'}, {anzahl} Dateien.", "ok": True}
+        if pr.get("regel") == "speedrace":
+            version, anzahl, _, bau_inhalt, bau_anzahl = signieren_mit_bau(ordner, pr, str(p.get("kennwort") or ""))
+            bau_text = (f" {BAU_SIGNATUR_DATEI}: {bau_anzahl} Bau-Dateien." if bau_inhalt else
+                        " Hinweis: keine Bau-Dateien (Dockerfile, tools/ …) gefunden - keine SIGNATUR-BAU.json erzeugt.")
+        else:
+            version, anzahl, _ = signieren(ordner, pr, str(p.get("kennwort") or ""))
+            bau_text = ""
+        return {"meldung": f"SIGNATUR.json geschrieben: Version {version or '(ohne)'}, {anzahl} Dateien.{bau_text}", "ok": True}
     if name == "pruefen_ordner":
         ordner = str(p.get("ordner") or "").strip().strip('"')
         if not os.path.isdir(ordner):
             raise ValueError("Ordner nicht gefunden.")
-        return {"pruefung": pruefen(ordner, pr.get("oeffentlich") or "", pr.get("regel", "alle"), pr.get("ausschluss"))}
+        return {"pruefung": pruefen(ordner, pr.get("oeffentlich") or "", pr.get("regel", "alle"), pr.get("ausschluss")),
+                "bau": bau_pruefen(ordner, pr.get("oeffentlich") or "") if pr.get("regel") == "speedrace" else None}
     if name in ("signieren_github", "pruefen_github"):
         if not pr.get("repo"):
             raise ValueError("Im Profil ist kein GitHub-Repository eingetragen.")
+        speedrace = pr.get("regel") == "speedrace"
         with tempfile.TemporaryDirectory(prefix="signier-") as tmp:
             ordner, stand = github_laden(pr["repo"], pr.get("zweig") or "main", token, tmp)
             if name == "pruefen_github":
                 return {"pruefung": pruefen(ordner, pr.get("oeffentlich") or "", pr.get("regel", "alle"), pr.get("ausschluss")),
+                        "bau": bau_pruefen(ordner, pr.get("oeffentlich") or "") if speedrace else None,
                         "stand": stand[:7]}
             if not token:
                 raise ValueError("Zum Hochladen wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
-            version, anzahl, inhalt = signieren(ordner, pr, str(p.get("kennwort") or ""))
+            bau_text = ""
+            if speedrace:
+                baum = github_baum(pr["repo"], token, stand)
+                version, anzahl, inhalt, bau_inhalt, bau_anzahl = signieren_mit_bau(
+                    ordner, pr, str(p.get("kennwort") or ""), bau_aus_baum(baum))
+            else:
+                version, anzahl, inhalt = signieren(ordner, pr, str(p.get("kennwort") or ""))
+                bau_inhalt = None
             github_tag_frei(pr["repo"], token, version, stand)
-            commit = github_hochladen(pr["repo"], pr.get("zweig") or "main", token, inhalt, version, stand)
+            if bau_inhalt:
+                commit = github_hochladen_commit(pr["repo"], pr.get("zweig") or "main", token,
+                                                 {SIGNATUR_DATEI: inhalt, BAU_SIGNATUR_DATEI: bau_inhalt}, version,
+                                                 stand, baum)
+                bau_text = f" {BAU_SIGNATUR_DATEI} für {bau_anzahl} Bau-Dateien im selben Commit."
+            else:
+                commit = github_hochladen(pr["repo"], pr.get("zweig") or "main", token, inhalt, version, stand)
+                if speedrace:
+                    bau_text = " Hinweis: keine Bau-Dateien (Dockerfile, tools/ …) gefunden - keine SIGNATUR-BAU.json erzeugt."
             try:
                 tag = github_tag_setzen(pr["repo"], token, version, commit)
                 tag_text = f" Tag {tag} gesetzt." if tag else ""
             except ValueError as e:
                 tag_text = f" Tag konnte nicht gesetzt werden: {e}"
         hoch = "SIGNATUR.json war schon aktuell" if commit == stand else f"SIGNATUR.json hochgeladen (Commit {commit[:7]})"
+        if bau_inhalt:
+            hoch = hoch.replace("SIGNATUR.json war", "SIGNATUR.json und SIGNATUR-BAU.json waren").replace(
+                "SIGNATUR.json hochgeladen", "SIGNATUR.json und SIGNATUR-BAU.json hochgeladen")
         return {"ok": True, "meldung": f"Version {version or '(ohne)'} ({anzahl} Dateien, Stand {stand[:7]}) signiert, "
-                                       f"{hoch}.{tag_text} Jetzt kann das Update eingespielt werden."}
+                                       f"{hoch}.{bau_text}{tag_text} Jetzt kann das Update eingespielt werden."}
     raise ValueError("Unbekannte Aktion.")
 
 
@@ -2057,11 +2341,17 @@ $("s-ordner-los").onclick = async e => {
   mit("s-status", e.target, "Signiere …", async () => {
     const d = await api("signieren_ordner", {id: p.id, kennwort: kw, ordner: $("s-ordner").value}); status("s-status", "ok", "✅ " + esc(d.meldung)); });
 };
+function bauZeile(b) {
+  if (!b) return "";
+  const z = {ok: "✅ Bau-Dateien: ", warn: "⚠️ Bau-Dateien (Hinweis): ", fehler: "❌ Bau-Dateien: ", fehlt: "ℹ️ Bau-Dateien: "};
+  return `<div style="margin-top:8px">${z[b.stufe] || ""}${esc(b.text)}</div>`;
+}
 function pruefErgebnis(d) {
   const r = d.pruefung || {};
-  if (r.ok) return status("p-status", "ok", `✅ Signatur gültig – Version ${esc(r.version || "(ohne)")}, alle ${r.anzahl} Dateien passen${d.stand ? " (GitHub-Stand " + esc(d.stand) + ")" : ""}.`);
+  const bauFehler = d.bau && d.bau.stufe === "fehler";
+  if (r.ok) return status("p-status", bauFehler ? "fehler" : "ok", `✅ Signatur gültig – Version ${esc(r.version || "(ohne)")}, alle ${r.anzahl} Dateien passen${d.stand ? " (GitHub-Stand " + esc(d.stand) + ")" : ""}.` + bauZeile(d.bau));
   const art = r.arten || {};
-  status("p-status", "fehler", "❌ " + esc(r.fehler || "Nicht gültig.") + (r.abweichend && r.abweichend.length ? "<ul>" + r.abweichend.map(n => `<li><span class="mono">${esc(n)}</span>${art[n] ? " (" + esc(art[n]) + ")" : ""}</li>`).join("") + "</ul>" : ""));
+  status("p-status", "fehler", "❌ " + esc(r.fehler || "Nicht gültig.") + (r.abweichend && r.abweichend.length ? "<ul>" + r.abweichend.map(n => `<li><span class="mono">${esc(n)}</span>${art[n] ? " (" + esc(art[n]) + ")" : ""}</li>`).join("") + "</ul>" : "") + bauZeile(d.bau));
 }
 $("p-github").onclick = e => mit("p-status", e.target, "Lade von GitHub und prüfe …", async () => {
   const p = Z.profile.find(x => x.id === $("p-profil").value); if (!p || !p.oeffentlich) throw new Error("Profil ohne Schlüssel.");
@@ -2161,9 +2451,11 @@ function qZeichnen() {
       <button class="zweit" data-qkopie="${s.nr}">Kopieren</button></div>`;
     if (s.id === "version" && QZ.lauf && QZ.lauf.paket) {
       const k = QZ.lauf.paket;
-      h += `<div class="status ok">✅ ${esc(k.tag)} – Signatur gültig (${k.signiert} signierte Dateien), Commit <span class="mono">${esc(k.commit.slice(0, 7))}</span>,
+      const bauT = k.bau_stufe === "fehlt" || k.bau_stufe == null ? " Keine Bau-Signatur (Version vor 1.8.8): Dockerfile, tools/ usw. sind nicht signiert."
+        : ` Bau-Signatur gültig (${k.bau_signiert} Bau-Dateien)${k.bau_stufe === "warn" ? " – Hinweis: " + esc(k.bau_text) : ""}.`;
+      h += `<div class="status ok">✅ ${esc(k.tag)} – Signatur gültig (${k.signiert} signierte Dateien).${bauT} Commit <span class="mono">${esc(k.commit.slice(0, 7))}</span>,
         ZIP-Prüfsumme <span class="mono">${esc(k.sha256)}</span>.<details style="margin-top:6px"><summary>${k.unsigniert_anzahl} Dateien nicht von der Signatur erfasst
-        (aus demselben Tag-Commit)</summary><div class="mono hinweis">${k.unsigniert.map(esc).join("<br>")}</div></details></div>`;
+        (aus demselben Tag-Commit, gelangen nicht ins Image)</summary><div class="mono hinweis">${k.unsigniert.map(esc).join("<br>")}</div></details></div>`;
     }
     if (s.fehler.length) h += `<details ${st === "fehler" ? "open" : ""} style="margin-top:8px"><summary class="hinweis">Typische Fehler und Abhilfe</summary><ul>`
       + s.fehler.map(f => `<li><span class="mono">${esc(f[0])}</span> – ${esc(f[1])}</li>`).join("") + "</ul></details>";
@@ -2181,9 +2473,18 @@ function qZeichnen() {
       if (s.art === "anleitung" || st === "laeuft") {
         if (s.rueckfrage === "root") h += `<label for="q-root">Ist der Benutzer root (Zahl nach „Verbindung-OK“ ist 0)?</label><select id="q-root">
           <option value="">– bitte wählen –</option><option value="ja">ja (0) – ohne sudo</option><option value="nein">nein – mit sudo</option></select>`;
+        if (s.rueckfrage === "treffer") h += `<label for="q-treffer">Welche Zahl wurde angezeigt?</label><select id="q-treffer">
+          <option value="">– bitte wählen –</option><option value="mehr">1 oder mehr – Prüfung möglich</option><option value="0">0 – Programm älter als 1.8.8</option></select>
+          <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="q-ohne" style="width:auto">
+          Nur bei 0: Programm älter als 1.8.8 – Bau-Dateien nicht prüfbar. Trotzdem weiter (Prüfschritt wird übersprungen).</label>`;
+        if (s.rueckfrage === "bauergebnis") h += `<div class="hinweis">Nur zählen, wenn eine Zeile mit „OK:“, „HINWEIS:“ oder „FEHLER:“ erscheint – sonst „Fehler – Hilfe anzeigen“.</div>
+          <div class="zeile" style="margin-top:8px"><button data-qbau="0">Ergebnis 0 (OK) – Neubau freigeben</button>
+          <button class="zweit" data-qbau="1">Ergebnis 1 (HINWEIS)</button><button class="zweit" data-qbau="2">Ergebnis 2 (FEHLER) – nicht bauen</button></div>
+          <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="q-hinweisok" style="width:auto">
+          Nur bei Ergebnis 1: Ich habe den Hinweis gelesen und will trotzdem neu bauen.</label>`;
         if (s.rueckfrage === "compose") h += `<label for="q-variante">Welche Variante hat eine Version gemeldet?</label><select id="q-variante">
           <option value="">– bitte wählen –</option><option value="plugin">docker compose</option><option value="standalone">docker-compose</option></select>`;
-        h += `<div class="zeile" style="margin-top:10px"><button data-qmeld="geklappt">Hat geklappt</button>
+        h += `<div class="zeile" style="margin-top:10px">${s.rueckfrage === "bauergebnis" ? "" : '<button data-qmeld="geklappt">Hat geklappt</button>'}
           ${s.art !== "anleitung" ? `<button class="zweit" data-qmeld="fehler">Fehler – Hilfe anzeigen</button>` : ""}
           ${s.art !== "anleitung" ? `<button class="zweit" data-qlos="${s.nr}">Noch einmal ausführen</button>` : ""}
           ${s.optional ? `<button class="zweit" data-qmeld="uebersprungen">Überspringen</button>` : ""}</div>`;
@@ -2202,6 +2503,11 @@ function qZeichnen() {
     status("q-sstatus", "ok", "✅ " + d.versionen.length + " Versionen. Die neueste ist vorausgewählt."); });
   document.querySelectorAll("[data-qlos]").forEach(b => b.onclick = () => qAusfuehren(QZ.schritte[+b.dataset.qlos], b));
   document.querySelectorAll("[data-qmeld]").forEach(b => b.onclick = () => qMelden(QZ.schritte[idx], b.dataset.qmeld, b));
+  document.querySelectorAll("[data-qbau]").forEach(b => b.onclick = () => {
+    const e = b.dataset.qbau;
+    if (e === "1" && !$("q-hinweisok").checked) return status("q-sstatus", "fehler", "Bei Ergebnis 1 erst den Hinweis bestätigen (Häkchen).");
+    qMelden(QZ.schritte[idx], e === "2" ? "fehler" : "geklappt", b, {bauergebnis: e, hinweis_bestaetigt: $("q-hinweisok").checked});
+  });
 }
 async function qAusfuehren(s, knopf) {
   const extra = {schritt: s.id, bestaetigt: true};
@@ -2220,13 +2526,15 @@ async function qAusfuehren(s, knopf) {
       : "✅ Fenster geöffnet. Wenn es fertig ist: Ergebnis hier melden (das Fenster kannst du danach schließen).");
   });
 }
-function qMelden(s, ergebnis, knopf) {
-  const extra = {schritt: s.id, ergebnis};
+function qMelden(s, ergebnis, knopf, mehr) {
+  const extra = {schritt: s.id, ergebnis, ...(mehr || {})};
+  if ($("q-treffer")) { extra.treffer = $("q-treffer").value; extra.ohne_pruefung = $("q-ohne").checked; }
   if ($("q-root")) extra.root = $("q-root").value;
   if ($("q-variante")) extra.compose = $("q-variante").value;
   mit("q-sstatus", knopf, "Speichere …", async () => {
     const d = await api("qnap_rueckmelden", extra); qSetzen(d);
     if (d.fertig) return status("q-status", "ok", "✅ Ablauf abgeschlossen. Alles steht im Protokoll.");
+    if (ergebnis === "fehler" && extra.bauergebnis === "2") return status("q-sstatus", "fehler", "❌ Neubau gesperrt: Bau-Dateien aus der signierten Version neu holen, nicht bauen. Danach die Prüfung wiederholen oder den Ablauf abbrechen.");
     if (ergebnis === "fehler") return status("q-sstatus", "fehler", "Fehler gemeldet – unter „Typische Fehler und Abhilfe“ nachsehen. Danach den Schritt erneut ausführen oder den Ablauf abbrechen.");
     const n = $("qs-" + d.lauf.index); if (n) n.scrollIntoView({behavior: "smooth", block: "center"});
   });

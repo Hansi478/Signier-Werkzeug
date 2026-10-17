@@ -66,6 +66,17 @@ Tag schon auf einem anderen Stand, bricht es ab, ohne etwas hochzuladen (eine ve
 Version wird nie verändert): dann `VERSION` erhöhen. Archive mit unzulässigen Pfaden,
 Verknüpfungen oder auffälliger Größe werden ganz abgelehnt.
 
+### Bau-Signatur (`SIGNATUR-BAU.json`, ab Dashboard 1.8.8)
+
+Bei Profilen „Speedrace-Dashboard“ signiert das Werkzeug zusätzlich die Dateien, aus denen
+das Docker-Image gebaut wird: `Dockerfile`, `.dockerignore`, `docker-compose.yml`, alles unter
+`tools/` und `.github/workflows/` (ohne `__pycache__`/`*.pyc`). Sie stehen bewusst nicht in
+`SIGNATUR.json` – laufende Dashboards verlangen dort genau die Update-Dateien. Eigenes Format
+`sr-bau-signatur-1`, derselbe Schlüssel; beide Dateien gehen in **einem** Commit nach GitHub.
+Symbolische Links oder Submodule im Bau-Bereich brechen das Signieren ab. Ältere Versionen
+ohne Bau-Dateien bekommen keine `SIGNATUR-BAU.json` (Hinweis). „Prüfen“ zeigt die Bau-Dateien
+in einer eigenen Zeile (Abweichung bei `docker-compose.yml` nur Hinweis).
+
 ## QNAP (Dashboard auf dem NAS installieren oder neu bauen)
 
 Reiter „QNAP“: Das Werkzeug begleitet die SSH-Schritte für das Dashboard auf einer QNAP –
@@ -85,9 +96,14 @@ Abläufe:
 - **Neue Version installieren:** Version (signierter Tag `v…`) wählen → das Werkzeug lädt
   sie, prüft die Signatur und baut eine saubere ZIP → hochladen → Container anhalten →
   alten Programmordner beiseitelegen (`….alt-Datum-Uhrzeit`, nicht löschen) → entpacken
-  (mit Prüfsummen-Kontrolle) → `build --no-cache` → `up -d` → Kontrolle → optional
+  (mit Prüfsummen-Kontrolle) → Bau-Dateien prüfen → `build --no-cache` → `up -d` → Kontrolle → optional
   aufräumen (alten Ordner, ZIP, alte Images).
 - **Nur neu bauen:** gleiche Version, neues Image (`build --no-cache`, `up -d`).
+
+Vor jedem Neubau: „Bau-Dateien prüfen“ (`app.py --bau-pruefen`, ab Dashboard 1.8.8). Vorher
+sieht das Werkzeug per `grep` nach, ob `app.py` den Schalter kennt – ein älteres Programm würde
+sonst das Dashboard starten. Ergebnis 0: Neubau frei; 1 (Hinweis): nur nach Bestätigung;
+2 (Fehler): Neubau gesperrt – Bau-Dateien aus der signierten Version neu holen.
 - **Zur vorigen Version zurück:** den beiseitegelegten Ordner wieder an seinen Platz.
 - **Aufräumen:** beiseitegelegten Ordner endgültig löschen, ZIP und alte Images entfernen.
 

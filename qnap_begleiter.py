@@ -240,6 +240,22 @@ def _b_entpacken(pr, lauf, z, roh):
             f"else unzip -q {q(o['zipname'])} && ls -la {q(o['name'])}; fi")
 
 
+def _b_bau_vorpruefung(pr, lauf, z, roh):
+    return f"grep -c -- '--bau-pruefen' {q(orte(pr)['p'] + '/app.py')}"
+
+
+def _b_bau_pruefen(pr, lauf, z, roh):
+    # Container läuft („Nur neu bauen“): im laufenden Container prüfen
+    return (f"cd {q(orte(pr)['p'])} && {{ {compose(pr, roh)} exec dashboard python app.py --bau-pruefen; "
+            "echo Ergebnis=$?; }")
+
+
+def _b_bau_pruefen_run(pr, lauf, z, roh):
+    # Container angehalten („Neue Version installieren“): einmalig starten, nur die Prüfung
+    return (f"cd {q(orte(pr)['p'])} && {{ {compose(pr, roh)} run --rm --no-deps --entrypoint python dashboard "
+            "app.py --bau-pruefen; echo Ergebnis=$?; }")
+
+
 def _b_bauen(pr, lauf, z, roh):
     return f"cd {q(orte(pr)['p'])} && {compose(pr, roh)} build --no-cache"
 
@@ -403,6 +419,47 @@ SCHRITTE = {
                    ("ABBRUCH: … gibt es noch", "Der alte Programmordner ist nicht beiseitegelegt."),
                    ("unzip: not found", "unzip fehlt - „Zur vorigen Version zurück“ verwenden.")],
     },
+    "bau_vorpruefung": {
+        "titel": "Kennt das Programm die Bau-Prüfung?", "art": "ssh", "befehl": _b_bau_vorpruefung,
+        "rueckfrage": "treffer",
+        "erklaerung": ["Sucht in app.py nach dem Schalter „--bau-pruefen“ (ab Dashboard 1.8.8). Ein älteres Programm "
+                       "kennt ihn nicht und würde mit dem unbekannten Schalter das Dashboard starten - deshalb erst nachsehen.",
+                       "Es wird nur gesucht, nichts gestartet."],
+        "erwartet": "Eine Zahl. 0 = Programm älter als 1.8.8 (Bau-Dateien nicht prüfbar), 1 oder mehr = Prüfung möglich. "
+                    "Danach unten angeben, was angezeigt wurde.",
+        "fehler": [("No such file or directory", "Programmordner falsch oder app.py fehlt - nicht weitermachen.")] + _SSH_FEHLER,
+    },
+    "bau_pruefen": {
+        "titel": "Bau-Dateien prüfen", "art": "ssh", "befehl": _b_bau_pruefen, "rueckfrage": "bauergebnis",
+        "erklaerung": ["Prüft mit dem fest eingebauten Schlüssel des Herausgebers, ob Dockerfile, Startskript, Updatehelfer "
+                       "usw. im Programmordner genau der signierten Version entsprechen - bevor daraus ein neues Image "
+                       "mit root-Rechten entsteht.",
+                       "Der Container läuft dabei weiter; die Prüfung läuft darin („docker compose exec“)."],
+        "erwartet": "Eine Zeile „OK: …“, „HINWEIS: …“ oder „FEHLER: …“ und danach „Ergebnis=0“, „=1“ oder „=2“. "
+                    "Steht keine solche Zeile da (z. B. „service is not running“), „Fehler – Hilfe anzeigen“.",
+        "fehler": [("Ergebnis=2 / FEHLER:", "Bau-Dateien aus der signierten Version neu holen, nicht bauen "
+                    "(„Neue Version installieren“)."),
+                   ("Ergebnis=1 / HINWEIS:", "z. B. docker-compose.yml lokal angepasst oder eine zusätzliche Datei - "
+                    "prüfen, ob das gewollt ist. Gebaut wird nur nach ausdrücklicher Bestätigung."),
+                   ("service \"dashboard\" is not running", "Der Container läuft nicht - erst starten oder den Ablauf "
+                    "„Neue Version installieren“ verwenden.")] + _COMPOSE_FEHLER + _SUDO_FEHLER,
+    },
+    "bau_pruefen_run": {
+        "titel": "Bau-Dateien prüfen", "art": "ssh", "befehl": _b_bau_pruefen_run, "rueckfrage": "bauergebnis",
+        "erklaerung": ["Prüft mit dem fest eingebauten Schlüssel des Herausgebers, ob Dockerfile, Startskript, Updatehelfer "
+                       "usw. im Programmordner genau der signierten Version entsprechen - bevor daraus ein neues Image "
+                       "mit root-Rechten entsteht.",
+                       "Der Container ist angehalten; für die Prüfung startet „docker compose run --rm“ ihn kurz nur mit "
+                       "Python (ohne Dashboard) und entfernt ihn danach wieder."],
+        "erwartet": "Eine Zeile „OK: …“, „HINWEIS: …“ oder „FEHLER: …“ und danach „Ergebnis=0“, „=1“ oder „=2“. "
+                    "Steht keine solche Zeile da, „Fehler – Hilfe anzeigen“.",
+        "fehler": [("Ergebnis=2 / FEHLER:", "Bau-Dateien aus der signierten Version neu holen, nicht bauen "
+                    "(„Zur vorigen Version zurück“, dann neu installieren)."),
+                   ("Ergebnis=1 / HINWEIS:", "z. B. docker-compose.yml lokal angepasst oder eine zusätzliche Datei - "
+                    "prüfen, ob das gewollt ist. Gebaut wird nur nach ausdrücklicher Bestätigung."),
+                   ("No such image / pull access denied", "Es gibt noch kein Image - dann ist keine Prüfung mit dem "
+                    "Programm möglich; „Fehler“ melden und den Ablauf abbrechen.")] + _COMPOSE_FEHLER + _SUDO_FEHLER,
+    },
     "bauen": {
         "titel": "Image neu bauen", "art": "ssh", "befehl": _b_bauen,
         "erklaerung": ["Baut das Image ohne Zwischenspeicher neu: neues Startskript, neuer Updatehelfer, aktuelle Pakete. "
@@ -476,10 +533,12 @@ for _sid, _s in SCHRITTE.items():
 ABLAEUFE = {
     "installieren": {"titel": "Neue Version installieren",
                      "schritte": ["vorbereitung", "verbindung", "werkzeuge", "version", "hochladen", "ordner", "zustand",
-                                  "anhalten", "beiseite", "entpacken", "bauen", "starten", "kontrolle",
+                                  "anhalten", "beiseite", "entpacken", "bau_vorpruefung", "bau_pruefen_run", "bauen",
+                                  "starten", "kontrolle",
                                   "alt_loeschen", "zip_loeschen", "images"]},
     "neubau": {"titel": "Nur neu bauen (gleiche Version)",
-               "schritte": ["vorbereitung", "verbindung", "werkzeuge", "ordner", "zustand", "bauen", "starten:warnung",
+               "schritte": ["vorbereitung", "verbindung", "werkzeuge", "ordner", "zustand", "bau_vorpruefung", "bau_pruefen",
+                            "bauen", "starten:warnung",
                             "kontrolle", "images"]},
     "zurueck": {"titel": "Zur vorigen Version zurück",
                 "schritte": ["verbindung", "anhalten:optional", "wegstellen", "zurueckholen", "starten", "kontrolle"]},
@@ -767,6 +826,9 @@ class Begleiter:
             lauf, s, i = self._aktuell(z, schritt_id)
             if s["art"] == "anleitung":
                 raise ValueError("Dieser Schritt ist nur zum Lesen.")
+            if s["id"] == "bauen" and lauf.get("bau_gesperrt"):
+                raise ValueError("Neubau gesperrt: Die Bau-Dateien passen nicht zur Signatur (Ergebnis 2). "
+                                 "Bau-Dateien aus der signierten Version neu holen, nicht bauen.")
             befehl, programm, zeile = self._planen(z, lauf, s, pr)
             lauf["marke"] = secrets.token_urlsafe(16)
             lauf["geplant"] = {"schritt": s["id"], "befehl": befehl, "programm": programm, "zeile": zeile}
@@ -833,7 +895,27 @@ class Begleiter:
                     raise ValueError("Der Schritt wurde noch nicht ausgeführt.")
             else:
                 raise ValueError("Unbekannte Rückmeldung.")
+            sprung, notiz = 1, ""
             if ergebnis == "geklappt":
+                if s["rueckfrage"] == "treffer":
+                    if p.get("treffer") not in ("0", "mehr"):
+                        raise ValueError("Bitte angeben, welche Zahl angezeigt wurde (0 oder mehr).")
+                    if p["treffer"] == "0":
+                        if p.get("ohne_pruefung") is not True:
+                            raise ValueError("Programm älter als 1.8.8 – Bau-Dateien nicht prüfbar. Weiter nur nach "
+                                             "ausdrücklicher Bestätigung.")
+                        sprung, notiz = 2, "Programm älter als 1.8.8 – Bau-Dateien nicht prüfbar, Prüfung übersprungen"
+                        lauf["status"][str(i + 1)] = "uebersprungen"
+                if s["rueckfrage"] == "bauergebnis":
+                    e = str(p.get("bauergebnis") or "")
+                    if e == "2":
+                        raise ValueError("Ergebnis 2: Neubau gesperrt - bitte „Fehler“ melden.")
+                    if e not in ("0", "1"):
+                        raise ValueError("Bitte das angezeigte Ergebnis (0, 1 oder 2) angeben.")
+                    if e == "1" and p.get("hinweis_bestaetigt") is not True:
+                        raise ValueError("Ergebnis 1 (Hinweis): Neubau nur nach ausdrücklicher Bestätigung.")
+                    lauf["bau_gesperrt"] = False
+                    notiz = "Ergebnis=" + e + (" (Hinweis bestätigt)" if e == "1" else "")
                 if s["rueckfrage"] == "root":
                     if p.get("root") not in ("ja", "nein"):
                         raise ValueError("Bitte angeben: Ist der Benutzer root (id -u = 0)?")
@@ -849,12 +931,16 @@ class Begleiter:
             elif s["id"] == "beiseite" and lauf.get("beiseite_gestartet"):
                 # unklar, ob umbenannt wurde: den Namen für den Rückweg merken
                 z["alt"] = lauf["beiseite_gestartet"]
+            if ergebnis == "fehler" and s["rueckfrage"] == "bauergebnis":
+                lauf["bau_gesperrt"] = True   # gilt, bis eine Wiederholung 0 bzw. bestätigt 1 ergibt
+                if str(p.get("bauergebnis") or "") == "2":
+                    notiz = "Ergebnis=2 - Neubau gesperrt"
             lauf["status"][str(i)] = {"geklappt": "erledigt", "fehler": "fehler", "uebersprungen": "uebersprungen"}[ergebnis]
             lauf["ausgefuehrt"] = None
             if ergebnis != "fehler":
-                lauf["index"] = i + 1
+                lauf["index"] = i + sprung
             self.protokollieren(lauf["ablauf"], s["id"], {"geklappt": "hat geklappt", "fehler": "Fehler",
-                                                         "uebersprungen": "übersprungen"}[ergebnis])
+                                                         "uebersprungen": "übersprungen"}[ergebnis], notiz)
             fertig = lauf["index"] >= len(_schritte(lauf["ablauf"]))
             if fertig:
                 self.protokollieren(lauf["ablauf"], "-", "Ablauf abgeschlossen")
