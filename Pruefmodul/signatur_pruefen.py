@@ -19,8 +19,8 @@ Signieren im Signier-Werkzeug (Test tests/test_sicherheit.py vergleicht beide):
 - Verknüpfungen (Symlinks, Junctions), FIFOs, Sockets und Geräte sind Fehler -
   auch wenn sie unter eine Ausnahme fielen; ein ausgenommener Ordner („…/*“)
   wird gar nicht betreten,
-- zwei Pfade, die unter Windows gleich wären (Groß-/Kleinschreibung,
-  Unicode-Normalform), sind ein Fehler.
+- zwei Pfade, die unter Windows/macOS gleich sein könnten (Groß-/Klein-
+  schreibung, Unicode-Normalform), sind ein Fehler.
 Wichtig: prüfen, BEVOR die neue Version installiert oder gestartet wird. Den
 öffentlichen Schlüssel als Voreinstellung im Programm hinterlegen; ersetzen
 darf ihn nur der Betreiber (Umgebungsvariable/Admin-Einstellung), nie eine
@@ -144,12 +144,12 @@ def _dateiliste(wurzel, ausschluss, kompilate=None):
             raise SignaturFehler(f"Unzulässiger Dateiname: {rel!r}")
         k = unicodedata.normalize("NFC", rel).casefold()
         if k in dateien:
-            raise SignaturFehler(f"Pfade kollidieren (unter Windows gleich): {dateien[k]} und {rel}")
+            raise SignaturFehler(f"Pfade kollidieren (unter Windows/macOS möglicherweise gleich): {dateien[k]} und {rel}")
         dateien[k] = rel
         teile = k.split("/")
         ordner.update("/".join(teile[:i]) for i in range(1, len(teile)))
     for k in ordner & set(dateien):
-        raise SignaturFehler(f"Datei und Ordner kollidieren (unter Windows gleich): {dateien[k]}")
+        raise SignaturFehler(f"Datei und Ordner kollidieren (unter Windows/macOS möglicherweise gleich): {dateien[k]}")
     return {rel: _pruefsumme(voll) for rel, voll in eintraege}
 
 

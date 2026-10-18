@@ -66,7 +66,7 @@ EXE_NAME = "Signier-Werkzeug.exe"
 # SHA-256 von Pruefmodul/signatur_pruefen.py dieses Stands über den Inhalt mit
 # LF-Zeilenenden (ein Windows-Checkout hat CRLF) - steht im Prompt zur Einbindung
 # (die Sitzung vergleicht damit); tests/test_einbindung.py prüft sie
-PRUEFMODUL_SHA256 = "39cb10e4f5cb718b31af4ee849144f7ff08a42c054c11aaa88ec9d55b24f3d6e"
+PRUEFMODUL_SHA256 = "8bce59876c13dc0024a71c22c4221817c0004198745259bc253878bc286e57d1"
 _VERSION_RE = re.compile(r"^(\d{1,4})\.(\d{1,4})\.(\d{1,4})$")
 _EXE_MIN, _EXE_MAX = 5 * 1024 * 1024, 150 * 1024 * 1024
 MB = 1024 * 1024
@@ -354,12 +354,12 @@ def _eindeutig(eintraege):
             raise ValueError(f"Unzulässiger Dateiname im Bestand: {rel!r}")
         k = _pfad_schluessel(rel)
         if k in dateien:
-            raise ValueError(f"Pfade kollidieren (unter Windows gleich): {dateien[k]} und {rel}")
+            raise ValueError(f"Pfade kollidieren (unter Windows/macOS möglicherweise gleich): {dateien[k]} und {rel}")
         dateien[k] = rel
         teile = k.split("/")
         ordner.update("/".join(teile[:i]) for i in range(1, len(teile)))
     for k in ordner & set(dateien):
-        raise ValueError(f"Datei und Ordner kollidieren (unter Windows gleich): {dateien[k]}")
+        raise ValueError(f"Datei und Ordner kollidieren (unter Windows/macOS möglicherweise gleich): {dateien[k]}")
 
 
 def ausschluss_muster(ausschluss):
@@ -470,7 +470,22 @@ def _version_pruefen(version):
         raise ValueError(f"VERSION muss die Form x.y.z haben (z. B. 1.2.3), nicht {version!r}. Nichts geschrieben.")
 
 
+def _schreibweise_pruefen(wurzel):
+    """Feste Namen nur in genau dieser Schreibweise: Windows fände „version“ als
+    „VERSION“ (das Ziel unter Linux nicht) und ersetzte beim Schreiben eine
+    „Signatur.json“ - die frische Signatur wäre sofort ungültig."""
+    try:
+        namen = os.listdir(wurzel)
+    except OSError:
+        return
+    for fest in ("VERSION", SIGNATUR_DATEI, BAU_SIGNATUR_DATEI, "app.py"):
+        anders = [n for n in namen if n.casefold() == fest.casefold() and n != fest]
+        if anders:
+            raise ValueError(f"„{anders[0]}“ hat eine andere Schreibweise als „{fest}“ - bitte umbenennen. Nichts geschrieben.")
+
+
 def _dateiliste_zum_signieren(wurzel, profil):
+    _schreibweise_pruefen(wurzel)
     kompilate = [] if profil.get("regel", "alle") != "speedrace" else None
     dateien = dateiliste(wurzel, profil.get("regel", "alle"), profil.get("ausschluss"), kompilate)
     if kompilate:   # würden nicht signiert, „Prüfen“ und das Prüfmodul lehnten sie danach ab
@@ -1207,7 +1222,7 @@ def _zip_plan(z, g):
         teile = zip_pfad_teile(rel, g)
         k = _pfad_schluessel(rel)
         if k in arten:
-            raise ValueError(f"Doppelter bzw. unter Windows gleicher Pfad im Archiv: {rel[:80]!r} - abgelehnt.")
+            raise ValueError(f"Doppelter bzw. unter Windows/macOS möglicherweise gleicher Pfad im Archiv: {rel[:80]!r} - abgelehnt.")
         for i in range(1, len(teile)):
             pk = _pfad_schluessel("/".join(teile[:i]))
             if arten.get(pk) == "datei":
@@ -1758,6 +1773,13 @@ def _fremde_signatur_sichern(ordner, pr):
     return os.path.join(ziel, name)
 
 
+def _einbindung_werte():
+    """Konstanten des Werkzeugs für den Prompt zur Einbindung."""
+    return {"VERSION": VERSION, "FORMAT": FORMAT, "SIGNATUR_DATEI": SIGNATUR_DATEI,
+            "STANDARD_AUSSCHLUSS": STANDARD_AUSSCHLUSS, "BINAER": BINAER, "WERKZEUG_REPO": WERKZEUG_REPO,
+            "PRUEFMODUL_SHA256": PRUEFMODUL_SHA256, "MAX_SIGNATUR_BYTES": MAX_SIGNATUR_BYTES, "ZIP_GRENZEN": ZIP_GRENZEN}
+
+
 def _profil(d, pid):
     p = next((p for p in d.get("profile") or [] if p.get("id") == pid), None)
     if not p:
@@ -2097,6 +2119,9 @@ def aktion(name, p):
             t = geheim_lesen(wert)
             if not t:
                 raise ValueError("Das alte Token ist nicht lesbar - bitte entfernen und neu eingeben.")
+            if token_speicher_art() == "sitzung":   # sonst wäre es nach dem Neustart weg
+                raise ValueError("Auf diesem System gibt es keinen sicheren Speicher (Schlüsselbund) - das Token bleibt "
+                                 "vorerst, wie es ist. Ohne Schlüsselbund: Token entfernen und je Sitzung neu eingeben.")
             d["github_token"] = geheim_speichern(t)
             profile_speichern(d)
             return {**_ansicht(d), "meldung": "Altes Klartext-Token übernommen: " + _token_meldung(d)}
@@ -2105,10 +2130,7 @@ def aktion(name, p):
             if pr.get("regel") == "speedrace":
                 raise ValueError("Für das Speedrace-Dashboard gelten eigene Regeln (SIGNATUR.json und SIGNATUR-BAU.json) - "
                                  "der Prompt zur Einbindung ist für Profile „andere Software“.")
-            text = einbindung_prompt.erzeugen(pr, {
-                "VERSION": VERSION, "FORMAT": FORMAT, "SIGNATUR_DATEI": SIGNATUR_DATEI,
-                "STANDARD_AUSSCHLUSS": STANDARD_AUSSCHLUSS, "BINAER": BINAER, "WERKZEUG_REPO": WERKZEUG_REPO,
-                "PRUEFMODUL_SHA256": PRUEFMODUL_SHA256})
+            text = einbindung_prompt.erzeugen(pr, _einbindung_werte())
             datei = "Prompt_Einbindung_" + (re.sub(r"[^A-Za-z0-9_-]+", "_", str(pr.get("name") or "")).strip("_")[:40] or "Profil") + ".md"
             return {"text": text, "datei": datei}
         if name == "ordner_oeffnen":
@@ -2425,9 +2447,7 @@ def _sicherheit_selbsttest(tmp):
         except ValueError:
             pass
     try:   # Prompt zur Einbindung (Modul in der exe, Vorlage vollständig)
-        einbindung_prompt.erzeugen({"name": "Probe", "oeffentlich": WERKZEUG_SCHLUESSEL}, {
-            "VERSION": VERSION, "FORMAT": FORMAT, "SIGNATUR_DATEI": SIGNATUR_DATEI, "STANDARD_AUSSCHLUSS": STANDARD_AUSSCHLUSS,
-            "BINAER": BINAER, "WERKZEUG_REPO": WERKZEUG_REPO, "PRUEFMODUL_SHA256": PRUEFMODUL_SHA256})
+        einbindung_prompt.erzeugen({"name": "Probe", "oeffentlich": WERKZEUG_SCHLUESSEL}, _einbindung_werte())
     except (ValueError, KeyError) as e:
         fehler.append(f"einbindung: {e}")
     for arg in ("a%PATH%", "a!b", 'a"b'):
@@ -2529,7 +2549,7 @@ Version __VERSION__ <button class="zweit" id="beenden">Beenden</button></div></h
    <option value="alle">Alle Dateien außer Ausnahmen</option></select></div></div>
   <div class="zeile"><div><label for="b-repo">GitHub-Repository (Besitzer/Name)</label><input id="b-repo" placeholder="Besitzer/Name"></div>
   <div><label for="b-zweig">Zweig</label><input id="b-zweig" value="main"></div></div>
-  <div id="b-aus-box"><label for="b-ausschluss">Ausnahmen (eine je Zeile, z. B. <span class="mono">*.log</span> oder <span class="mono">daten/*</span>; Groß-/Kleinschreibung zählt); immer ausgenommen: <span class="mono">__AUSGENOMMEN__</span></label>
+  <div id="b-aus-box"><label for="b-ausschluss">Ausnahmen (eine je Zeile, z. B. <span class="mono">*.log</span> oder <span class="mono">daten/*</span>; Groß-/Kleinschreibung zählt); immer ausgenommen: <span class="mono">__AUSGENOMMEN__</span> – <span class="mono">__pycache__</span>/<span class="mono">*.pyc</span> werden nicht signiert, liegen welche im Ordner, brechen Signieren und Prüfen ab (vorher löschen)</label>
   <textarea id="b-ausschluss"></textarea></div>
   <div class="zeile" style="margin-top:12px"><button id="b-speichern">Speichern</button><button class="zweit" id="b-abbrechen">Abbrechen</button></div>
   <div id="b-schluessel" class="versteckt" style="margin-top:16px;border-top:1px solid var(--rand);padding-top:12px">

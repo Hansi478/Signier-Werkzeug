@@ -57,9 +57,9 @@ dieselbe Regel eigenständig um, und ein Test vergleicht beide.
 | Frage | Regel |
 |---|---|
 | Was gehört dazu? | **Regel „speedrace“:** genau die Einträge aus `UPDATE_ALLOWED_FILES`/`UPDATE_ALLOWED_DIRS` der `app.py`, so wie ein Update des Dashboards sie übernimmt. **Regel „alle“:** alle Dateien des Ordners, rekursiv. |
-| Was ist ausdrücklich ausgenommen? | `SIGNATUR.json`. Bei „speedrace“ in den Ordnern `__pycache__/` und `*.pyc`, alle anderen Einträge der obersten Ebene gehören nicht zum Update. Bei „alle“: `.git/*`, `.github/*`, `__pycache__`, `*.pyc` und die Ausnahmen des Profils. Ausnahmen sind `fnmatchcase`-Muster mit `/` als Trenner (`\` wird als `/` gelesen): **Groß-/Kleinschreibung zählt auf jedem Betriebssystem**, damit die Windows-exe genau den Umfang signiert, den das Prüfmodul auf einem Linux-Server erwartet. Ordner, die über `…/*` ausgenommen sind, werden gar nicht betreten. |
-| Kompilierte Python-Dateien | `__pycache__/` und `*.pyc` werden nicht signiert, Python lädt sie aber (eine „unchecked-hash“-pyc ohne Abgleich mit der Quelle). Bei „alle“ lehnen Prüfmodul und „Prüfen“ sie deshalb ab, außer in ausgenommenen Ordnern. Der QNAP-Ablauf installiert keinen Stand, der welche enthält. |
-| Verbotene Typen | Symlinks, Windows-Junctions/Reparse-Points, FIFOs, Sockets, Geräte. Das ist ein **Fehler**, auch wenn der Eintrag unter eine Ausnahme fiele. Nichts wird stillschweigend übersprungen. |
+| Was ist ausdrücklich ausgenommen? | `SIGNATUR.json`. Bei „speedrace“ in den Ordnern `__pycache__/` und `*.pyc`, alle anderen Einträge der obersten Ebene gehören nicht zum Update. Bei „alle“: `.git/*`, `.github/*`, `__pycache__`, `*.pyc` und die Ausnahmen des Profils. Jedes Muster trifft den relativen Pfad oder den Dateinamen: `.git/*` und `.github/*` gelten deshalb nur im Wurzelordner (ein `.git` in einem Unterordner wird mitsigniert), `SIGNATUR.json` in jeder Tiefe. Ausnahmen sind `fnmatchcase`-Muster mit `/` als Trenner (`\` wird als `/` gelesen): **Groß-/Kleinschreibung zählt auf jedem Betriebssystem**, damit die Windows-exe genau den Umfang signiert, den das Prüfmodul auf einem Linux-Server erwartet. Ordner, die über `…/*` ausgenommen sind, werden gar nicht betreten. |
+| Kompilierte Python-Dateien | `__pycache__/` und `*.pyc` werden nicht signiert, Python lädt sie aber (eine „unchecked-hash“-pyc ohne Abgleich mit der Quelle). Bei „alle“ lehnen Signieren, Prüfmodul und „Prüfen“ sie deshalb ab, außer in ausgenommenen Ordnern. Der QNAP-Ablauf installiert keinen Stand, der welche enthält. |
+| Verbotene Typen | Symlinks, Windows-Junctions und andere Name-Surrogate-Reparse-Points (z. B. Mount-Points), FIFOs, Sockets, Geräte. Andere Reparse-Points (z. B. OneDrive-Platzhalter) gelten als normale Dateien. Das ist ein **Fehler**, auch wenn der Eintrag unter eine Ausnahme fiele. Nichts wird stillschweigend übersprungen. |
 | Pfade | `/` als Trenner. `\` und Steuerzeichen sind verboten. Zwei Pfade, die unter Windows dieselbe Datei wären (Groß-/Kleinschreibung, Unicode-Normalform NFC), sind ein Fehler, ebenso Datei und Ordner gleichen Namens. |
 | Prüfen | Zusätzliche, fehlende und veränderte Dateien werden einzeln gemeldet. Eine Verknüpfung oder ein Sondertyp macht das Ergebnis immer ungültig. |
 
@@ -137,8 +137,8 @@ und die neue exe beim Update (Zufallsname statt fester `.neu`-Datei).
 
 **Windows:** Windows kennt kein `dir_fd`. Dort sorgen `O_CREAT|O_EXCL`
 (entspricht `CREATE_NEW`, folgt keiner Verknüpfung) und `MoveFileEx` (ersetzt
-nur den Eintrag) für dasselbe Verhalten. Reparse-Points werden über
-`st_file_attributes` erkannt. Beide Wege werden getestet: Linux in
+nur den Eintrag) für dasselbe Verhalten. Verknüpfungen werden über
+`st_file_attributes` und `st_reparse_tag` (Name-Surrogate) erkannt. Beide Wege werden getestet: Linux in
 `pruefen.yml`, Windows in `pruefen.yml`, `bauen.yml` und im Selbsttest der exe.
 
 ## 4. Import eines GitHub-Stands (zipball)
@@ -354,22 +354,31 @@ Der Bereich leitet SSH-Schritte auf einer QNAP an. Er ist bewusst eng gehalten:
   zusätzlich auf Zeichen geprüft, die cmd.exe auch in Anführungszeichen auswertet (`%`, `!`,
   `"`, Steuerzeichen).
 - **Was angefasst wird.** Im Elternordner des Programmordners nur der Programmordner
-  (umbenennen, nie löschen), selbst angelegte `<Name>.alt-JJJJMMTT-hhmm`/`.kaputt-…` und
-  die eigene `<Name>.zip`. `rm -r` gibt es nur für einen `.alt-…`-Ordner, den das Werkzeug
-  selbst angelegt und gemerkt hat. Kein `-f`, keine Platzhalterzeichen, keine Variablen.
-  Umbenennen und Löschen verlangen den abgetippten Namen. Der Programmordner darf nicht
+  (umbenennen, nie löschen), selbst angelegte `<Name>.alt-JJJJMMTT-hhmm`/`.kaputt-…`, der
+  Zwischenordner `<Name>.entpacken-…` (entpackt wird dorthin, erst danach wird umbenannt -
+  ein Abbruch hinterlässt keinen halben Programmordner) und die eigenen ZIPs
+  `<Name>.signier-JJJJMMTT-hhmm.zip` (gelöscht nur, wenn vorhanden). `rm -r` gibt es nur für
+  einen `.alt-…`-Ordner, den das Werkzeug selbst angelegt und gemerkt hat. Kein `-f`, keine
+  Platzhalterzeichen, keine Variablen außer der Hilfsdatei der Bau-Prüfung (`mktemp`).
+  Umbenennen und Löschen eines Ordners verlangen den abgetippten Namen. Der Programmordner darf nicht
   `Daten` oder `container-station-data` heißen.
 - **Herkunft der Version.** Nur signierte Tags `v<x.y.z>`. Das Werkzeug lädt den Tag-Commit
   über die GitHub-API (mit den ZIP-Prüfungen aus Abschnitt 4), prüft die Signatur mit dem
   öffentlichen Schlüssel des gewählten Profils (Bestandsregel aus Abschnitt 2) und verlangt,
   dass Signatur und `VERSION` zum Tag passen. Daraus baut es eine neue ZIP mit genau einem
-  Ordner. Auf der QNAP prüft `sha256sum -c` die Prüfsumme vor dem Entpacken.
+  Ordner und **nur den signierten Dateien** (dazu die signierten Bau-Dateien und die
+  Signaturdateien) - eine unsignierte Datei im Tag-Commit (etwa eine fremde `json.py`) käme
+  sonst ungeprüft in den Programmordner. Auf der QNAP prüft `sha256sum -c` die Prüfsumme vor dem Entpacken.
 - **Bau-Dateien:** Ab Dashboard 1.8.8 prüft „Version laden und prüfen“ auch
   `SIGNATUR-BAU.json` (Fehler oder andere Version: nicht installieren). Vor jedem Neubau prüft
   der Schritt „Bau-Dateien prüfen“ auf der QNAP mit `app.py --bau-pruefen` (fest eingebauter
   Schlüssel des Herausgebers). Vorher sucht `grep -c -- '--bau-pruefen' app.py`, ob das Programm
   den Schalter kennt; bei 0 wird die Prüfung nur nach ausdrücklicher Bestätigung übersprungen.
-  Ergebnis 2 sperrt den Neubau (auch serverseitig), Ergebnis 1 nur nach Bestätigung.
+  `Ergebnis=…` erscheint nur, wenn die Prüfung wirklich lief (eine Zeile `OK:`/`HINWEIS:`/
+  `FEHLER:`); sonst „Ergebnis fehlt“ (z. B. sudo-Kennwort falsch, Container läuft nicht).
+  Ergebnis 2 sperrt den Neubau (auch serverseitig), Ergebnis 1 nur nach Bestätigung. Fehlt
+  `SIGNATUR-BAU.json` bei einer Version, deren signierte `app.py` die Bau-Prüfung kennt, lehnt
+  schon „Version laden und prüfen“ ab.
 - **Grenze:** Ältere Versionen (vor 1.8.8) haben keine Bau-Signatur - dort bleiben
   `Dockerfile`, `docker-compose.yml` und `tools/` unsigniert; das Werkzeug listet sie auf.
 - **Prüfen der Dashboard-Adresse:** nur GET, ohne Token, ohne Proxy, Weiterleitungen werden
@@ -380,8 +389,12 @@ Der Bereich leitet SSH-Schritte auf einer QNAP an. Er ist bewusst eng gehalten:
   Schlüssel sowie das Token für den Download. Auf private Schlüssel greift er nicht zu.
 - **Gemerktes:** Rückweg (`.alt`-Ordner), die vom Werkzeug hochgeladenen ZIPs (eigener Name
   `<Name>.signier-JJJJMMTT-hhmm.zip`, nur diese löscht „Aufräumen“) und eine Bau-Sperre nach
-  Ergebnis 2 gelten über einen Abbruch hinaus. Host und Programmordner lassen sich nicht
-  ändern, solange etwas davon gemerkt ist. Ein Lauf merkt sich die Liste seiner Schritte -
+  Ergebnis 2 gelten über einen Abbruch hinaus. Die Sperre gilt den geprüften Dateien: Kommt ein
+  anderer Stand in den Programmordner (entpacken, wegstellen, zurückholen), fällt sie. Ein
+  „Fehler“ ohne Ergebnis 2 sperrt nur den laufenden Ablauf. Der Programmordner lässt sich
+  nicht ändern, solange etwas gemerkt ist; eine neue Adresse derselben QNAP nur nach
+  Bestätigung (protokolliert). Gemerkte ZIPs lassen sich vergessen. Der Rückweg baut das Image
+  nur neu, wenn die Installation schon gebaut hat. Ein Lauf merkt sich die Liste seiner Schritte -
   ändert ein Update die Abläufe, muss er neu begonnen werden.
 
 ### Lokale Oberfläche
@@ -391,14 +404,19 @@ muss ihn mitschicken, Host und Origin werden geprüft. Es läuft nur **eine** In
 Windows-Benutzer (Sperre `instanz.lock` im Datenordner): Ein zweiter Start öffnet die
 laufende Seite (Adresse in `adresse.txt`, nur für diesen Benutzer lesbar) statt einer zweiten
 Instanz, die `profile.json` bzw. `qnap.json` überschreiben könnte. Beenden ist gesperrt,
-solange ein Vorgang läuft; ohne Lebenszeichen der Seite beendet sich das Werkzeug nach
-10 Minuten (nie mitten in einem Vorgang).
+solange ein Vorgang läuft (auch ein offenes Auswahlfenster); danach nimmt es keine neuen
+Aktionen mehr an. Ohne Lebenszeichen der Seite beendet sich das Werkzeug nach 10 Minuten
+(nie mitten in einem Vorgang). Jedes Profil trägt einen Stand: Speichern aus einem Tab, der
+einen älteren Stand zeigt, wird abgelehnt (sonst setzte er Änderungen des anderen Tabs zurück).
 
 ## 8. Bekannte Grenzen
 
 - Die Bau-Signatur wird etwas strenger geprüft als im Dashboard: Base64 mit Zeilenumbruch
   oder fremden Zeichen gilt im Werkzeug als ungültig, im Dashboard nicht; ein nicht lesbarer
   Unterordner ist im Werkzeug ein Fehler, im Dashboard nur ein Hinweis („fehlt“).
+- Zwei Pfade, die sich nur in Groß-/Kleinschreibung oder Unicode-Normalform unterscheiden,
+  lehnen Werkzeug und Prüfmodul ab - zur Sicherheit auch Fälle, die Windows unterscheidet
+  (etwa „ß“/„ss“, `casefold`).
 - „Ordner signieren“ nimmt alle Dateien des Ordners, auch nicht eingecheckte. Bei einem
   Git-Arbeitsordner weist das Werkzeug darauf hin; für genau den Repository-Stand „Von GitHub
   laden, signieren und hochladen“ verwenden.

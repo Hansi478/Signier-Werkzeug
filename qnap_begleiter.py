@@ -14,8 +14,9 @@ Grundsätze (siehe SICHERHEIT.md, Abschnitt „QNAP-Begleiter“):
 - Befehle entstehen nur aus festen Vorlagen und geprüften Profilwerten (kein
   Freitext); Pfade stehen immer in einfachen Anführungszeichen.
 - Im Elternordner des Programmordners fasst das Werkzeug nur an: den
-  Programmordner (nur umbenennen), selbst angelegte „<Name>.alt-…“-Ordner
-  und die selbst hochgeladene „<Name>.zip“. Alles andere (z. B. der
+  Programmordner (nur umbenennen), selbst angelegte „<Name>.alt-…“-,
+  „.kaputt-…“- und „.entpacken-…“-Ordner und die selbst hochgeladenen
+  „<Name>.signier-JJJJMMTT-hhmm.zip“. Alles andere (z. B. der
   Daten-Ordner) kommt in keinem Befehl vor.
 
 Dieses Modul enthält keine echten Namen, Adressen oder Pfade - nur

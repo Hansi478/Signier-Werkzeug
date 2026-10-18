@@ -109,12 +109,16 @@ Vor jedem Neubau: „Bau-Dateien prüfen“ (`app.py --bau-pruefen`, ab Dashboar
 sieht das Werkzeug per `grep` nach, ob `app.py` den Schalter kennt – ein älteres Programm würde
 sonst das Dashboard starten. Ergebnis 0: Neubau frei; 1 (Hinweis): nur nach Bestätigung;
 2 (Fehler): Neubau gesperrt – Bau-Dateien aus der signierten Version neu holen.
-- **Zur vorigen Version zurück:** den beiseitegelegten Ordner wieder an seinen Platz.
+- **Zur vorigen Version zurück:** den kaputten Ordner wegstellen, den beiseitegelegten Ordner
+  zurückholen, Bau-Dateien prüfen, neu bauen (nur nötig, wenn die Installation schon ein neues
+  Image gebaut hat – sonst überspringbar, z. B. ohne Internet) und starten.
 - **Aufräumen:** beiseitegelegten Ordner endgültig löschen, ZIP und alte Images entfernen.
 
 Im Elternordner des Programmordners fasst das Werkzeug nur den Programmordner (umbenennen),
-die selbst angelegten `….alt-…`-Ordner und die selbst hochgeladene `<Programmordner>.zip` an –
-den Daten-Ordner daneben nie. Protokoll (Zeit, Schritt, Befehl, Rückmeldung; keine
+die selbst angelegten `….alt-…`/`….kaputt-…`-Ordner, den Zwischenordner `….entpacken-…` und die
+selbst hochgeladenen ZIPs (`<Programmordner>.signier-JJJJMMTT-hhmm.zip`) an – den Daten-Ordner
+daneben nie. In die ZIP kommen nur signierte Dateien (dazu die signierten Bau-Dateien und die
+Signaturdateien); alles andere aus dem Tag-Commit zeigt das Werkzeug als „nicht übernommen“. Protokoll (Zeit, Schritt, Befehl, Rückmeldung; keine
 Passwörter): `%APPDATA%\Signier-Werkzeug\qnap-protokoll.txt`. Details: SICHERHEIT.md,
 Abschnitt 7.
 
@@ -127,7 +131,15 @@ einbaut – mit öffentlichem Schlüssel, Fingerabdruck, Ausnahmen, Regeln und A
 kein privater Schlüssel). Der Schlüssel ist in der Software nur Voreinstellung und lässt sich
 vom Betreiber ersetzen, nie aus einer Datei, die mit einem Update kommt. Die Software prüft mit `Pruefmodul/signatur_pruefen.py` - mit genau derselben
 Regel wie beim Signieren: zusätzliche, fehlende und veränderte Dateien sind Fehler,
-Verknüpfungen (Symlinks) und Sondertypen ebenfalls.
+Verknüpfungen (Symlinks) und Sondertypen ebenfalls. `__pycache__/` und `*.pyc` werden nicht
+signiert, Python lädt sie aber: Signieren und Prüfen brechen deshalb ab, wenn welche im Ordner
+liegen (vorher löschen).
+
+Ist für ein Profil ein öffentlicher Schlüssel hinterlegt, aber die Schlüsseldatei fehlt (z. B.
+auf den USB-Stick verschoben), lässt sich nur genau dieser Schlüssel wieder übernehmen – ein
+neuer würde die Prüfung in der eingesetzten Software brechen. Eine fremde `SIGNATUR.json`
+(anderer Schlüssel) sichert „Ordner signieren“ vor dem Überschreiben im Datenordner
+(`sicherung\`).
 
 ## Tests
 

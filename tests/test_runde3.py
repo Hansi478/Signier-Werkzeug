@@ -118,6 +118,17 @@ class LokalSignierenTests(Basis):
         self.schreiben("__pycache__/a.cpython-313.pyc", b"\0")
         self.assertRaisesRegex(ValueError, "Kompilierte", self.signieren, pr)
 
+    def test_feste_namen_genau_geschrieben(self):
+        """N9: „version“ bzw. „Signatur.json“ (Windows fände sie als VERSION/SIGNATUR.json)."""
+        pr = self.profil_mit_schluessel()
+        self.schreiben("a.txt", b"1")
+        for name in ("version", "Signatur.json"):
+            self.schreiben(name, b"1.0.0\n")
+            with self.subTest(name=name):
+                self.assertRaisesRegex(ValueError, "Schreibweise", self.signieren, pr)
+            os.remove(os.path.join(self.tmp, "ordner", name))
+        self.signieren(pr)
+
     def test_fremde_signatur_wird_gesichert(self):
         fremd = self.profil_mit_schluessel(name="Fremd")
         pr = self.profil_mit_schluessel()

@@ -694,9 +694,9 @@ class TokenTests(Basis):
             self.assertEqual(kr.get_password(W._KEYRING_DIENST, W._KEYRING_NAME), TOKEN)
         W.profile_speichern({"github_token": "klar:" + base64.b64encode(TOKEN.encode()).decode()})
         with mock.patch.object(W, "_keyring", return_value=None):
-            z = W.aktion("token_migrieren", {})
-            self.assertEqual(z["token_speicher"], "sitzung")
-            self.assertNotIn("klar:", self.profile_text())
+            # ohne sicheren Speicher wäre das Token nach dem Neustart weg: bleibt, wie es ist
+            self.assertRaisesRegex(ValueError, "keinen sicheren Speicher", W.aktion, "token_migrieren", {})
+            self.assertIn("klar:", self.profile_text())
 
     def test_unsichere_keyring_backends_abgelehnt(self):
         class PlaintextKeyring(_FakeKeyring):

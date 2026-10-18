@@ -71,7 +71,7 @@ class EinbindungTests(unittest.TestCase):
         self.assertNotIn("{{", t)
         self.assertIn(SCHLUESSEL, t)
         self.assertIn("04B4 5F7A 55E8 BEB9 AEB2 34D5 8A95 812A 5710 2226 AA9E 777F 4C2D 30C1 CAE7 8086", t)
-        self.assertIn("`logs/*`, `*.log`", t)
+        self.assertIn('["logs/*", "*.log"]', t)
         self.assertIn("**Besitzer/beispiel**", t)
         self.assertEqual(d["datei"], "Prompt_Einbindung_Beispiel-Software.md")
         self.assertIn("keine", self.text(ausschluss=[])["text"].split("Ausnahmen des Profils")[1].splitlines()[0])
@@ -82,8 +82,24 @@ class EinbindungTests(unittest.TestCase):
         for satz in ("Keine Tags `v<Version>` automatisch setzen", "export-ignore", "Submodule",
                      "Nie** aus einer Datei, die mit einem Update kommt", "nicht stillschweigend",
                      "Version laut Signatur == Inhalt von `VERSION` == gewählter Tag", "Die Versionsnummer vergebe ich",
-                     "Nicht signieren"):
+                     "Im Repository nicht signieren", "Genau den geprüften Ordner", 'filter="data"',
+                "Ausnahme:\n  die Update-Quelle", "Rückstufung", "hexadezimal in Kleinbuchstaben"):
             self.assertIn(satz, t)
+
+    def test_ausnahmen_unverfaelscht_und_ein_durchgang(self):
+        """N23: Backtick, Backslash und „{{…}}“ in Ausnahmen bzw. Namen."""
+        t = self.text(ausschluss=["a`b", "daten\\*", "{{FORMAT}}", "{{neu}}"], name="Name {{ZWEIG}}")["text"]
+        self.assertIn('["a`b", "daten/*", "{{FORMAT}}", "{{neu}}"]', t)   # wie ausschluss_muster im Werkzeug
+        self.assertIn("„Name {{ZWEIG}}“", t)
+        self.assertEqual(W.ausschluss_muster(["daten\\*"])[-1], "daten/*")
+
+    def test_grenzen_aus_dem_werkzeug(self):
+        t = self.text()["text"]
+        g = W.ZIP_GRENZEN
+        for teil in (f"{g['pfad_zeichen']} Zeichen", f"mehr als {g['tiefe']} Teilen", f"{g['datei_bytes'] // W.MB} MB",
+                     f"{g['eintraege']} Einträge", f"{g['je_ordner']} in einem", f"{g['gesamt_bytes'] // W.MB} MB entpackt",
+                     f"{g['archiv_bytes'] // W.MB} MB", f"{g['verhaeltnis']}-fach", f"höchstens {W.MAX_SIGNATUR_BYTES // W.MB} MB"):
+            self.assertIn(teil, t)
 
     def test_keine_geheimnisse(self):
         t = self.text()["text"]
