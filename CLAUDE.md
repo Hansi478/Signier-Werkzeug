@@ -10,8 +10,9 @@
   die Vorlage **im selben Commit** anpassen. `PRUEFMODUL_SHA256` in `signier_werkzeug.py`
   muss zur Datei passen; `tests/test_einbindung.py` prüft das.
 - Keine echten Namen, Adressen, Hosts oder Pfade in Quelltext, Vorlagen oder Tests – nur
-  Platzhalter. Einzige Ausnahme: `WERKZEUG_REPO` (Quelle der eigenen Updates, funktional nötig)
-  samt öffentlichem Herausgeber-Schlüssel. Private Schlüssel nie ins Repository.
+  Platzhalter. Ausnahmen: `WERKZEUG_REPO` (Quelle der eigenen Updates, funktional nötig)
+  samt öffentlichem Herausgeber-Schlüssel, und der Copyright-Vermerk des Urhebers im Handbuch
+  der Oberfläche und in der README (vom Benutzer so gewünscht). Private Schlüssel nie ins Repository.
 - Actions in Workflows nur mit vollständigen Commit-SHAs.
 - Tests: `python -m unittest discover -s tests -v`; Selbsttest:
   `python signier_werkzeug.py --selbsttest selbst.txt`.

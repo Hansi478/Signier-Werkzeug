@@ -237,6 +237,16 @@ class TestsUndWorkflowsTests(Basis):
         self.assertRaises(P.SignaturFehler, P._dateiliste, ordner, [])
 
 
+class HandbuchTests(unittest.TestCase):
+    def test_info_knopf_handbuch_und_copyright(self):
+        self.assertIn('id="info-knopf"', W.SEITE)
+        kopf = W.SEITE.split("</header>")[0]
+        self.assertLess(kopf.index("Version __VERSION__"), kopf.index('id="info-knopf"'))   # neben der Version
+        hb = W.SEITE.split('id="hb-dialog"')[1].split('id="kw-dialog"')[0]
+        for teil in ("Handbuch", "Profile &amp; Schlüssel", "Signieren", "Prüfen", "QNAP", "© 2026 Hans-Christoph Rose"):
+            self.assertIn(teil, hb)
+
+
 class HochladenMeldungTests(unittest.TestCase):
     """N12: verlorene Antwort beim Vorspulen und beim Nachlesen."""
 

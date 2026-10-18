@@ -2686,7 +2686,9 @@ nav button{background:transparent;border:1px solid var(--rand);color:var(--leise
 input,select,textarea{width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--rand);background:var(--bg);color:var(--text);font:inherit}
 textarea{min-height:70px;font-family:Consolas,monospace;font-size:13px}
 button{padding:8px 14px;border-radius:8px;border:1px solid var(--akzent);background:var(--akzent);color:#fff;font:inherit;cursor:pointer}
-button.zweit{background:transparent;color:var(--text);border-color:var(--rand)}button:disabled{opacity:.5;cursor:wait}
+button.zweit{background:transparent;color:var(--text);border-color:var(--rand)}
+button.info{width:26px;height:26px;padding:0;border-radius:50%;font:italic 700 14px Georgia,serif}
+#hb-dialog h3{font-size:15px;margin:16px 0 4px}#hb-dialog p,#hb-dialog li{font-size:13.5px;line-height:1.5}button:disabled{opacity:.5;cursor:wait}
 .zeile{display:flex;gap:8px;align-items:end;flex-wrap:wrap}.zeile>*{flex:1 1 200px}.zeile>button{flex:0 0 auto}
 .hinweis{font-size:13px;color:var(--leise)}.mono{font-family:Consolas,monospace;word-break:break-all}
 .status{margin-top:12px;padding:10px 12px;border-radius:8px;display:none}.status.ok{display:block;background:#14532d;border:1px solid var(--ok)}
@@ -2697,7 +2699,8 @@ button.zweit{background:transparent;color:var(--text);border-color:var(--rand)}b
 .versteckt{display:none !important}button.hervor{box-shadow:0 0 0 3px var(--ok)}.status a{color:#93c5fd}ul{margin:6px 0 0 18px;padding:0}
 </style></head><body>
 <header><h1>🔏 Signier-Werkzeug</h1><div class="rechts"><button id="update-knopf" class="versteckt">Update</button>
-Version __VERSION__ <button class="zweit" id="beenden">Beenden</button></div></header>
+Version __VERSION__ <button class="zweit info" id="info-knopf" title="Handbuch und Copyright" aria-label="Handbuch und Copyright">i</button>
+<button class="zweit" id="beenden">Beenden</button></div></header>
 <div id="update-leiste" class="versteckt" style="padding:10px 20px;background:#1e293b;border-bottom:1px solid var(--rand)"></div>
 <main>
 <nav><button data-reiter="signieren" class="aktiv">Signieren</button><button data-reiter="pruefen">Prüfen</button>
@@ -2817,6 +2820,36 @@ Version __VERSION__ <button class="zweit" id="beenden">Beenden</button></div></h
  <div id="q-schritte"></div>
 </section>
 </main>
+<div id="hb-dialog" class="versteckt" role="dialog" aria-modal="true" aria-labelledby="hb-titel" style="position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:10">
+ <div class="karte" style="width:min(760px,94vw);max-height:88vh;overflow:auto">
+ <div class="zeile" style="align-items:center"><h2 id="hb-titel" style="margin:0">Handbuch – Signier-Werkzeug __VERSION__</h2>
+  <button class="zweit" id="hb-zu" style="margin-left:auto">Schließen</button></div>
+ <p>Das Werkzeug signiert Programmversionen mit einem eigenen Schlüssel (Ed25519), damit die eingesetzte
+ Software nur Versionen annimmt, die wirklich vom Herausgeber stammen. Der private Schlüssel verlässt diesen
+ Rechner nie; er liegt mit Kennwort verschlüsselt im Datenordner.</p>
+ <h3>1. Profile &amp; Schlüssel</h3>
+ <ul><li>Je Software ein Profil: „Speedrace-Dashboard“ (feste Regeln des Dashboards) oder „andere Software“ (alle Dateien außer Ausnahmen).</li>
+ <li>„Neuen Schlüssel erzeugen“ (Kennwort mind. 12 Zeichen) oder eine vorhandene <span class="mono">.pem</span> übernehmen. Den Ordner <span class="mono">schluessel</span> im Datenordner zusätzlich auf einen USB-Stick sichern.</li>
+ <li>Den öffentlichen Schlüssel dort eintragen, wo geprüft wird. Für „andere Software“ erzeugt „Prompt erzeugen“ einen Text, mit dem eine andere Sitzung die Prüfung einbaut.</li></ul>
+ <h3>2. GitHub</h3>
+ <ul><li>Ein Token (fein granular, Rechte „Contents: Read and write“ für das Repository) eintragen. Es wird unter Windows mit DPAPI verschlüsselt gespeichert.</li></ul>
+ <h3>3. Signieren</h3>
+ <ul><li>Vorher: <span class="mono">VERSION</span> (Form x.y.z) erhöhen, committen und pushen.</li>
+ <li>„Von GitHub laden, signieren und hochladen“: lädt den Stand des Zweigs, signiert, lädt <span class="mono">SIGNATUR.json</span> (beim Dashboard auch <span class="mono">SIGNATUR-BAU.json</span>) in einem Commit hoch und setzt den Tag <span class="mono">v&lt;Version&gt;</span>. Erst danach verteilen.</li>
+ <li>Gibt es den Tag schon, bricht das Werkzeug ab, bevor etwas hochgeladen wird – Tags werden nie verschoben.</li>
+ <li>„Paketliste prüfen / signieren“ (nur Dashboard): signiert die getestete <span class="mono">PAKETE.lock</span> vom Zweig „pakete“.</li>
+ <li>„Ordner signieren“: für einen Ordner auf diesem Rechner (alle Dateien darin, auch nicht eingecheckte).</li></ul>
+ <h3>4. Prüfen</h3>
+ <ul><li>Prüft einen GitHub-Stand oder Ordner gegen die Signatur: zusätzliche, fehlende und veränderte Dateien werden aufgelistet.</li></ul>
+ <h3>5. QNAP</h3>
+ <ul><li>Führt Schritt für Schritt durch Installieren, Neubauen, Zurück zur vorigen Version und Aufräumen auf dem NAS. Jeder Befehl wird vorher angezeigt und erst nach Bestätigung in einem Konsolenfenster ausgeführt; das Ergebnis meldest du zurück.</li>
+ <li>Vor jedem Neubau werden die Bau-Dateien geprüft (Ergebnis 0: frei, 1: nur nach Bestätigung, 2: gesperrt). Ein beiseitegelegter alter Ordner bleibt der Rückweg, bis „Aufräumen“ ihn löscht.</li></ul>
+ <h3>6. Updates des Werkzeugs</h3>
+ <ul><li>Neue Versionen erscheinen oben als „Update“. Sie werden nur eingespielt, wenn die Signatur des Herausgebers gültig ist.</li></ul>
+ <h3>Daten</h3>
+ <p>Profile, Schlüssel, Protokolle: <span class="mono" id="hb-daten"></span>. Ausführlich: README.md und SICHERHEIT.md im Repository <span class="mono">__REPO__</span>.</p>
+ <p style="margin-top:18px;border-top:1px solid var(--rand);padding-top:10px;color:var(--leise)">© 2026 Hans-Christoph Rose. Alle Rechte vorbehalten.</p>
+ </div></div>
 <div id="kw-dialog" class="versteckt" style="position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center">
  <div class="karte" style="width:min(420px,92vw)"><h2>Kennwort des Schlüssels</h2><div class="hinweis" id="kw-text"></div>
  <input id="kw-feld" type="password" autocomplete="off" style="margin-top:10px"><div class="zeile" style="margin-top:12px">
@@ -2984,6 +3017,14 @@ $("b-import").onclick = e => mit("b-status", e.target, "Schlüssel wird geprüft
   $("b-pfad-kw").value = ""; zeichnen(); schluesselTeil(Z.profile.find(x => x.id === $("b-id").value));
   status("b-status", "ok", "✅ " + esc(Z.meldung));
 });
+function handbuch(auf) {
+  $("hb-dialog").classList.toggle("versteckt", !auf);
+  if (auf) { $("hb-daten").textContent = Z.daten || ""; $("hb-zu").focus(); } else $("info-knopf").focus();
+}
+$("info-knopf").onclick = () => handbuch(true);
+$("hb-zu").onclick = () => handbuch(false);
+$("hb-dialog").onclick = ev => { if (ev.target === $("hb-dialog")) handbuch(false); };
+document.addEventListener("keydown", ev => { if (ev.key === "Escape" && !$("hb-dialog").classList.contains("versteckt")) handbuch(false); });
 $("daten-oeffnen").onclick = () => api("ordner_oeffnen", {was: "daten"}).catch(e => alert(e.message));
 document.querySelectorAll("[data-waehle]").forEach(b => b.onclick = () => waehlen("ordner_waehlen", b.dataset.waehle));
 function kennwort(text) {

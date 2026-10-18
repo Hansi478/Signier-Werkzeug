@@ -172,3 +172,9 @@ kommt eine E-Mail von GitHub. Ablauf für Sicherheitsupdates: [SICHERHEIT.md](SI
 Die privaten Schlüssel liegen mit Kennwort verschlüsselt in
 `%APPDATA%\Signier-Werkzeug\schluessel`. Diesen Ordner auf einen USB-Stick kopieren und das
 Kennwort sicher aufbewahren. Private Schlüssel gehören nie in dieses Repository.
+
+## Hilfe und Copyright
+
+Das „i“ neben der Versionsnummer öffnet ein kurzes Handbuch in der Oberfläche.
+
+© 2026 Hans-Christoph Rose. Alle Rechte vorbehalten.
