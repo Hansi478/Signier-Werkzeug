@@ -412,9 +412,6 @@ einen älteren Stand zeigt, wird abgelehnt (sonst setzte er Änderungen des ande
 
 ## 8. Bekannte Grenzen
 
-- Die Bau-Signatur wird etwas strenger geprüft als im Dashboard: Base64 mit Zeilenumbruch
-  oder fremden Zeichen gilt im Werkzeug als ungültig, im Dashboard nicht; ein nicht lesbarer
-  Unterordner ist im Werkzeug ein Fehler, im Dashboard nur ein Hinweis („fehlt“).
 - Zwei Pfade, die sich nur in Groß-/Kleinschreibung oder Unicode-Normalform unterscheiden,
   lehnen Werkzeug und Prüfmodul ab - zur Sicherheit auch Fälle, die Windows unterscheidet
   (etwa „ß“/„ss“, `casefold`).
