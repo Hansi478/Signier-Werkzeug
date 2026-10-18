@@ -260,16 +260,25 @@ def _b_bau_vorpruefung(pr, lauf, z, roh):
     return f"grep -c -- '--bau-pruefen' {q(orte(pr)['p'] + '/app.py')}"
 
 
+def _pruef_ergebnis(befehl):
+    """Bau-Prüfung ausführen; „Ergebnis=…“ nur, wenn sie wirklich lief (eine
+    Zeile OK:/HINWEIS:/FEHLER:). Sonst wäre z. B. sudo mit falschem Kennwort
+    oder „service is not running“ (Rückgabe 1) nicht von „Hinweise“ zu
+    unterscheiden."""
+    return ("t=$(mktemp) && { { " + befehl + " 2>&1; echo rc=$?; } | tee $t; "
+            "if grep -q -E '^(OK|HINWEIS|FEHLER): ' $t; then echo Ergebnis=$(sed -n 's/^rc=//p' $t); "
+            "else echo Ergebnis fehlt - keine Pruefung gelaufen, Fehler melden; fi; rm -f $t; }")
+
+
 def _b_bau_pruefen(pr, lauf, z, roh):
     # Container läuft („Nur neu bauen“): im laufenden Container prüfen
-    return (f"cd {q(orte(pr)['p'])} && {{ {compose(pr, roh)} exec dashboard python app.py --bau-pruefen; "
-            "rc=$?; if [ $rc -le 2 ]; then echo Ergebnis=$rc; else echo Ergebnis=$rc - keine Pruefung, Fehler melden; fi; }")
+    return f"cd {q(orte(pr)['p'])} && " + _pruef_ergebnis(f"{compose(pr, roh)} exec dashboard python app.py --bau-pruefen")
 
 
 def _b_bau_pruefen_run(pr, lauf, z, roh):
     # Container angehalten („Neue Version installieren“): einmalig starten, nur die Prüfung
-    return (f"cd {q(orte(pr)['p'])} && {{ {compose(pr, roh)} run --rm --no-deps --entrypoint python dashboard "
-            "app.py --bau-pruefen; rc=$?; if [ $rc -le 2 ]; then echo Ergebnis=$rc; else echo Ergebnis=$rc - keine Pruefung, Fehler melden; fi; }")
+    return f"cd {q(orte(pr)['p'])} && " + _pruef_ergebnis(
+        f"{compose(pr, roh)} run --rm --no-deps --entrypoint python dashboard app.py --bau-pruefen")
 
 
 def _b_bauen(pr, lauf, z, roh):
@@ -473,7 +482,8 @@ SCHRITTE = {
                        "mit root-Rechten entsteht.",
                        "Der Container läuft dabei weiter; die Prüfung läuft darin („docker compose exec“)."],
         "erwartet": "Eine Zeile „OK: …“, „HINWEIS: …“ oder „FEHLER: …“ und danach „Ergebnis=0“, „=1“ oder „=2“. "
-                    "Steht keine solche Zeile da (z. B. „service is not running“), „Fehler – Hilfe anzeigen“.",
+                    "Steht dort „Ergebnis fehlt“ (z. B. „service is not running“, sudo-Kennwort falsch), lief keine "
+                    "Prüfung: „Fehler“ melden.",
         "fehler": [("Ergebnis=2 / FEHLER:", "Bau-Dateien aus der signierten Version neu holen, nicht bauen "
                     "(„Neue Version installieren“)."),
                    ("Ergebnis=1 / HINWEIS:", "z. B. docker-compose.yml lokal angepasst oder eine zusätzliche Datei - "
@@ -491,7 +501,7 @@ SCHRITTE = {
                        "Gibt es noch gar kein Image (erste Installation), würde compose es vorher aus den noch ungeprüften "
                        "Dateien bauen - dann diesen Schritt nicht ausführen, sondern abbrechen."],
         "erwartet": "Eine Zeile „OK: …“, „HINWEIS: …“ oder „FEHLER: …“ und danach „Ergebnis=0“, „=1“ oder „=2“. "
-                    "Steht keine solche Zeile da, „Fehler – Hilfe anzeigen“.",
+                    "Steht dort „Ergebnis fehlt“, lief keine Prüfung: „Fehler“ melden.",
         "fehler": [("Ergebnis=2 / FEHLER:", "Bau-Dateien aus der signierten Version neu holen, nicht bauen "
                     "(„Zur vorigen Version zurück“, dann neu installieren)."),
                    ("Ergebnis=1 / HINWEIS:", "z. B. docker-compose.yml lokal angepasst oder eine zusätzliche Datei - "
@@ -1034,6 +1044,7 @@ class Begleiter:
                     z["alt"] = lauf.get("beiseite_gestartet") or ""
                 if s["id"] in ("alt_loeschen", "zurueckholen"):
                     z["alt"] = ""
+                    lauf.pop("beiseite_gestartet", None)   # sonst böte „Abbrechen“ den gelöschten Ordner als Rückweg an
                 if s["id"] == "zip_loeschen":
                     z.pop("zips", None)
             elif s["id"] == "beiseite" and lauf.get("beiseite_gestartet"):

@@ -385,8 +385,15 @@ class BestandTests(Basis):
     def test_roundtrip_pruefmodul(self):
         self.baum()
         pr = self.profil("alle", ["logs/*", "*.log", "appdata/*"])
+        # __pycache__ wird nicht signiert, aber geladen: Signieren, Prüfmodul und Werkzeug lehnen ab
+        self.assertRaisesRegex(ValueError, "Kompilierte", W.signieren, self.tmp, pr, "Test-Kennwort-123", "2.0.0")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "SIGNATUR.json")))
+        pyc = os.path.join(self.tmp, "unter", "__pycache__", "b.cpython-312.pyc")
+        with open(pyc, "rb") as f:
+            inhalt = f.read()
+        shutil.rmtree(os.path.dirname(pyc))
         W.signieren(self.tmp, pr, "Test-Kennwort-123", "2.0.0")
-        # __pycache__ wird nicht signiert, aber geladen: Prüfmodul und Werkzeug lehnen ab
+        self.schreiben("unter/__pycache__/b.cpython-312.pyc", inhalt)   # entsteht später beim Start
         with self.assertRaisesRegex(P.SignaturFehler, "Kompilierte Python-Dateien"):
             P.pruefen(self.tmp, pr["oeffentlich"], ["logs/*", "*.log", "appdata/*"])
         self.assertIn("Kompilierte", W.pruefen(self.tmp, pr["oeffentlich"], "alle", ["logs/*", "*.log", "appdata/*"])["fehler"])
@@ -411,11 +418,11 @@ class BestandTests(Basis):
         self.baum()
         aus = ["logs/*", "*.log", "appdata/*"]
         pr = self.profil("alle", aus)
+        shutil.rmtree(os.path.join(self.tmp, "unter", "__pycache__"))
         W.signieren(self.tmp, pr, "Test-Kennwort-123", "1.0.0")
         self.schreiben("neu.txt", b"zusatz")
         os.remove(os.path.join(self.tmp, "bild.png"))
         self.schreiben("unter/b.py", b"x = 2\n")
-        shutil.rmtree(os.path.join(self.tmp, "unter", "__pycache__"))
         r = W.pruefen(self.tmp, pr["oeffentlich"], "alle", aus)
         self.assertFalse(r["ok"])
         self.assertEqual(r["arten"], {"neu.txt": "zusätzlich", "bild.png": "fehlt", "unter/b.py": "verändert"})
@@ -427,6 +434,7 @@ class BestandTests(Basis):
         self.baum()
         aus = ["logs/*", "*.log", "appdata/*"]
         pr = self.profil("alle", aus)
+        shutil.rmtree(os.path.join(self.tmp, "unter", "__pycache__"))
         W.signieren(self.tmp, pr, "Test-Kennwort-123", "1.0.0")
         os.symlink(os.path.join(self.tmp, "a.txt"), os.path.join(self.tmp, "unter", "link.txt"))
         r = W.pruefen(self.tmp, pr["oeffentlich"], "alle", aus)

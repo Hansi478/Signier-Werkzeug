@@ -98,7 +98,7 @@ class SignierenGithubTests(Basis):
         hoch.assert_not_called()
 
     def test_version_mit_bom_oder_ungueltig(self):
-        for version, text in ((b"\xef\xbb\xbf1.0.0\n", "BOM"), (b"", "ungültig"), (b"neu\n", "ungültig")):
+        for version, text in ((b"\xef\xbb\xbf1.0.0\n", "BOM"), (b"", "x.y.z"), (b"neu\n", "x.y.z"), (b"1..2\n", "x.y.z")):
             with self.subTest(version=version):
                 e, hoch = self.lauf(version=version)
                 self.assertIsInstance(e, ValueError)
@@ -229,15 +229,37 @@ class BauSignaturSchreibenTests(Basis):
         if bau:
             self.schreiben(wurzel, "Dockerfile", b"FROM beispiel\n")
 
+    def _signatur_schreiben_scheitert(self, auch_ruecksetzen=False):
+        echt = W.atomar_schreiben
+        aufrufe = []
+
+        def schreiben(ordner, name, daten, *a, **k):
+            aufrufe.append(name)
+            if name == W.SIGNATUR_DATEI or (auch_ruecksetzen and len(aufrufe) > 2):
+                raise OSError("gesperrt")
+            return echt(ordner, name, daten, *a, **k)
+        return mock.patch.object(W, "atomar_schreiben", side_effect=schreiben), aufrufe
+
     def test_zweite_datei_scheitert_erste_wird_zurueckgesetzt(self):
         w = os.path.join(self.tmp, "stand")
         self.dashboard(w)
         pr = self.profil("speedrace")
         self.schreiben(w, "SIGNATUR-BAU.json", b"alt\n")
-        os.mkdir(os.path.join(w, "SIGNATUR.json"))   # Schreiben von SIGNATUR.json muss scheitern
-        self.assertRaises(ValueError, W.signieren_mit_bau, w, pr, KENNWORT)
+        patch, aufrufe = self._signatur_schreiben_scheitert()
+        with patch:
+            self.assertRaises(OSError, W.signieren_mit_bau, w, pr, KENNWORT)
+        self.assertEqual(aufrufe, ["SIGNATUR-BAU.json", "SIGNATUR.json", "SIGNATUR-BAU.json"])   # neu, scheitert, zurück
         with open(os.path.join(w, "SIGNATUR-BAU.json"), "rb") as f:
             self.assertEqual(f.read(), b"alt\n")
+
+    def test_ruecksetzen_scheitert_wird_gemeldet(self):
+        w = os.path.join(self.tmp, "stand")
+        self.dashboard(w)
+        pr = self.profil("speedrace")
+        self.schreiben(w, "SIGNATUR-BAU.json", b"alt\n")
+        patch, _ = self._signatur_schreiben_scheitert(auch_ruecksetzen=True)
+        with patch, self.assertRaisesRegex(ValueError, "passen jetzt nicht zusammen"):
+            W.signieren_mit_bau(w, pr, KENNWORT)
 
     def test_ohne_vorherige_bau_signatur_wird_sie_wieder_entfernt(self):
         w = os.path.join(self.tmp, "stand")

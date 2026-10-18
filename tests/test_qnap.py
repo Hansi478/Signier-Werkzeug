@@ -88,7 +88,9 @@ class EingabeTests(unittest.TestCase):
                                    "compose", "root"})
 
 
-Q_ERGEBNIS = "rc=$?; if [ $rc -le 2 ]; then echo Ergebnis=$rc; else echo Ergebnis=$rc - keine Pruefung, Fehler melden; fi;"
+Q_PRUEF_A = "t=$(mktemp) && { { "
+Q_PRUEF_B = (" 2>&1; echo rc=$?; } | tee $t; if grep -q -E '^(OK|HINWEIS|FEHLER): ' $t; then echo Ergebnis=$(sed -n "
+             "'s/^rc=//p' $t); else echo Ergebnis fehlt - keine Pruefung gelaufen, Fehler melden; fi; rm -f $t; }")
 
 
 class BefehlTests(unittest.TestCase):
@@ -156,11 +158,12 @@ class BefehlTests(unittest.TestCase):
             with self.subTest(schritt=sid):
                 b = s["befehl"](pr, lauf, z, False)
                 for teil in re.findall(r"'[^']*'", b):
-                    if teil.startswith("'ABBRUCH") or teil == "'" + "b" * 64 + "  programmordner.signier-20260101-1200.zip'":
+                    if teil.startswith("'ABBRUCH") or teil == "'" + "b" * 64 + "  programmordner.signier-20260101-1200.zip'" \
+                            or teil in ("'^(OK|HINWEIS|FEHLER): '", "'s/^rc=//p'"):
                         continue
                     self.assertIn(teil, erlaubt, b)
                 for verboten in ("*", "?", "rm -f", "rm -rf", "Daten", "container-station-data", "$", "`", '"'):
-                    self.assertNotIn(verboten, b.replace("'" + "b" * 64, "").replace(Q_ERGEBNIS, ""))
+                    self.assertNotIn(verboten, b.replace("'" + "b" * 64, "").replace(Q_PRUEF_A, "").replace(Q_PRUEF_B, ""))
                 if "rm -r" in b:
                     self.assertIn("rm -r -- 'programmordner.alt-20260101-1200'", b)
 
@@ -453,6 +456,25 @@ class InstallierenTests(Ablauf):
         self.assertIn("alter Ordner gemerkt", self.protokoll())
         self.b.beginnen("zurueck")   # Rückweg möglich
 
+    def test_abbrechen_nach_alt_loeschen_kein_rueckweg(self):
+        self.bis_beiseite()
+        v = self.b.vorbereiten("beiseite")
+        self.b.ausfuehren("beiseite", v["marke"], {"bestaetigt": True, "name": "programmordner"})
+        self.b.rueckmelden("beiseite", "geklappt", {})
+        alt = self.b.ansicht()["alt"]
+        self.schritt("entpacken")
+        self.schritt("bau_vorpruefung", treffer="mehr")
+        self.schritt("bau_pruefen_run", bauergebnis="0")
+        for sid in ("bauen", "starten", "kontrolle"):
+            self.schritt(sid)
+        v = self.b.vorbereiten("alt_loeschen")
+        self.b.ausfuehren("alt_loeschen", v["marke"], {"bestaetigt": True, "name": alt})
+        self.b.rueckmelden("alt_loeschen", "geklappt", {})
+        self.b.abbrechen()   # statt „ZIP löschen“ zu überspringen
+        self.assertEqual(self.b.ansicht()["alt"], "")   # der gelöschte Ordner ist kein Rückweg
+        self.assertRaises(ValueError, self.b.beginnen, "zurueck")
+        self.b.beginnen("installieren")
+
     def test_loeschen_und_wegstellen_nur_mit_beiden_ordnern(self):
         pr = profil(root_wert=True)
         z = {"alt": "programmordner.alt-20260101-1200"}
@@ -482,16 +504,30 @@ class BauPruefungTests(Ablauf):
         self.assertEqual(Q.SCHRITTE["bau_vorpruefung"]["befehl"](pr, {}, {}, False),
                          "grep -c -- '--bau-pruefen' '/share/BEISPIEL/programmordner/app.py'")
         self.assertEqual(Q.SCHRITTE["bau_pruefen"]["befehl"](pr, {}, {}, False),
-                         "cd '/share/BEISPIEL/programmordner' && { sudo docker compose exec dashboard python app.py "
-                         "--bau-pruefen; " + Q_ERGEBNIS + " }")
+                         "cd '/share/BEISPIEL/programmordner' && " + Q_PRUEF_A + "sudo docker compose exec dashboard "
+                         "python app.py --bau-pruefen" + Q_PRUEF_B)
         pr = profil(root_wert=True, compose="standalone")
         self.assertEqual(Q.SCHRITTE["bau_pruefen_run"]["befehl"](pr, {}, {}, False),
-                         "cd '/share/BEISPIEL/programmordner' && { docker-compose run --rm --no-deps --entrypoint python "
-                         "dashboard app.py --bau-pruefen; " + Q_ERGEBNIS + " }")
+                         "cd '/share/BEISPIEL/programmordner' && " + Q_PRUEF_A + "docker-compose run --rm --no-deps "
+                         "--entrypoint python dashboard app.py --bau-pruefen" + Q_PRUEF_B)
         # durch cmd.exe (Windows-Befehlszeile) unverändert
         prog, zeile = Q.befehlszeile(Q.ssh_argv(pr, Q.SCHRITTE["bau_pruefen"]["befehl"](pr, {}, {}, False), PROG), PROG)
-        self.assertIn('"cd \'/share/BEISPIEL/programmordner\' && { docker-compose exec dashboard python app.py '
-                      '--bau-pruefen; ' + Q_ERGEBNIS + ' }""', zeile)
+        self.assertIn('"cd \'/share/BEISPIEL/programmordner\' && ' + Q_PRUEF_A + 'docker-compose exec dashboard python '
+                      'app.py --bau-pruefen' + Q_PRUEF_B + '""', zeile)
+
+    def test_pruef_ergebnis_nur_wenn_pruefung_lief(self):
+        import subprocess
+        if not shutil.which("sh") or not shutil.which("mktemp"):
+            self.skipTest("keine POSIX-Shell")
+        for ausgabe, rc, erwartet in (("OK: alles gut", 0, "Ergebnis=0"), ("HINWEIS: compose", 1, "Ergebnis=1"),
+                                      ("FEHLER: veraendert", 2, "Ergebnis=2"),
+                                      ("sudo: 1 incorrect password attempt", 1, "Ergebnis fehlt"),
+                                      ("service dashboard is not running", 1, "Ergebnis fehlt")):
+            befehl = Q._pruef_ergebnis("sh -c " + Q.q(f"echo {ausgabe}; exit {rc}"))
+            aus = subprocess.run(["sh", "-c", befehl], capture_output=True, text=True).stdout
+            with self.subTest(ausgabe=ausgabe):
+                self.assertIn(ausgabe, aus)
+                self.assertEqual(aus.strip().splitlines()[-1][:len(erwartet)], erwartet)
 
     def test_reihenfolge_vor_dem_neubau(self):
         for ablauf, pruef in (("neubau", "bau_pruefen"), ("installieren", "bau_pruefen_run")):
@@ -629,9 +665,9 @@ class PaketTests(unittest.TestCase):
         self._env.stop()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def zipball(self, version="1.8.5", aendern=None, sig_version=None):
-        dateien = {"app.py": b"print(1)\n", "VERSION": (version + "\n").encode(), "templates/a.html": b"<p>\n",
-                   "Dockerfile": b"FROM x\n", "tools/start.sh": b"#!/bin/sh\n"}
+    def zipball(self, version="1.8.5", aendern=None, sig_version=None, app=b"print(1)\n"):
+        dateien = {"app.py": app, "VERSION": (version + "\n").encode(), "templates/a.html": b"<p>\n",
+                   "Dockerfile": b"FROM x\n", "tools/start.sh": b"#!/bin/sh\n", "skripte/lauf.sh": b"#!/bin/sh\n"}
         # Prüfsummen so, wie das Werkzeug sie bildet: über einen echten Ordner
         ordner = os.path.join(self.tmp, "quelle")
         shutil.rmtree(ordner, ignore_errors=True)
@@ -639,7 +675,7 @@ class PaketTests(unittest.TestCase):
             os.makedirs(os.path.join(ordner, os.path.dirname(rel)), exist_ok=True)
             with open(os.path.join(ordner, rel), "wb") as f:
                 f.write(daten)
-        signiert = W.dateiliste(ordner, "alle", self.pr["ausschluss"])
+        signiert = W.dateiliste(ordner, self.pr["regel"], self.pr["ausschluss"])
         v = sig_version or version
         sig = json.dumps({"format": W.FORMAT, "version": v, "dateien": signiert,
                           "signatur": base64.b64encode(self.privat.sign(W.nachricht(v, signiert))).decode()})
@@ -665,8 +701,8 @@ class PaketTests(unittest.TestCase):
 
     def test_gute_version(self):
         r = self.laden(self.zipball())
-        self.assertEqual((r["version"], r["commit"], r["signiert"], r["dateien"]), ("1.8.5", "e" * 40, 3, 6))
-        self.assertEqual(r["unsigniert"], ["Dockerfile", "tools/start.sh"])
+        self.assertEqual((r["version"], r["commit"], r["signiert"], r["dateien"]), ("1.8.5", "e" * 40, 4, 5))
+        self.assertEqual(r["unsigniert"], ["Dockerfile", "tools/start.sh"])   # nicht übernommen
         with open(r["zip"], "rb") as f:
             daten = f.read()
         self.assertEqual(hashlib.sha256(daten).hexdigest(), r["sha256"])
@@ -675,9 +711,26 @@ class PaketTests(unittest.TestCase):
             self.assertTrue(all(n.startswith("programmordner/") for n in namen), namen)
             self.assertIn("programmordner/templates/", namen)
             modi = {i.filename: (i.external_attr >> 16) & 0o777 for i in z.infolist()}
-        self.assertEqual(modi["programmordner/tools/start.sh"], 0o755)
+        self.assertEqual(modi["programmordner/skripte/lauf.sh"], 0o755)
+        self.assertNotIn("programmordner/Dockerfile", namen)   # unsigniert: nicht in die ZIP
+        self.assertNotIn("programmordner/tools/start.sh", namen)
         self.assertEqual(modi["programmordner/app.py"], 0o644)
         self.assertEqual(os.listdir(os.path.join(self.tmp, "ziel")), ["programmordner.zip"])   # nichts liegen geblieben
+
+    def test_fremde_datei_kommt_nicht_in_die_zip(self):
+        # ausgenommen (bei Speedrace: außerhalb der Update-Dateien) - früher trotzdem in der ZIP
+        r = self.laden(self.zipball(aendern={"tools/json.py": b"import os\n"}))
+        self.assertIn("tools/json.py", r["unsigniert"])
+        with zipfile.ZipFile(r["zip"]) as z:
+            self.assertNotIn("programmordner/tools/json.py", z.namelist())
+            self.assertIn("programmordner/SIGNATUR.json", z.namelist())
+
+    def test_speedrace_ohne_bau_signatur_obwohl_bekannt(self):
+        self.pr.update(regel="speedrace", ausschluss=[])
+        app = b'UPDATE_ALLOWED_FILES = ("app.py", "VERSION")\nUPDATE_ALLOWED_DIRS = ("templates",)\n'
+        self.assertEqual(self.laden(self.zipball(app=app))["bau_stufe"], "fehlt")   # ältere Version: erlaubt
+        with self.assertRaisesRegex(ValueError, "Bau-Prüfung kennt"):
+            self.laden(self.zipball(app=app + b"# --bau-pruefen\n"))
 
     def test_veraendert_abgelehnt(self):
         self.assertRaises(ValueError, self.laden, self.zipball(aendern={"app.py": b"print(2)\n"}))

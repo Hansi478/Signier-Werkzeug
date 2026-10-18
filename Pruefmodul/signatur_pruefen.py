@@ -164,9 +164,9 @@ def pruefen(wurzel, oeffentlicher_schluessel, ausschluss=None):
     except (OSError, ValueError, UnicodeDecodeError, RecursionError, SignaturFehler):
         raise SignaturFehler("SIGNATUR.json fehlt oder ist ungültig")
     version = str(sig.get("version") or "")
-    nachricht = json.dumps({"format": FORMAT, "version": version, "dateien": sig["dateien"]},
-                           sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    try:
+    try:   # auch die Nachricht: einzelne Surrogate („\ud800“) sind gültiges JSON, aber kein UTF-8
+        nachricht = json.dumps({"format": FORMAT, "version": version, "dateien": sig["dateien"]},
+                               sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         Ed25519PublicKey.from_public_bytes(base64.b64decode(oeffentlicher_schluessel, validate=True)).verify(
             base64.b64decode(str(sig.get("signatur") or ""), validate=True), nachricht)
     except (InvalidSignature, ValueError, TypeError):
@@ -174,7 +174,7 @@ def pruefen(wurzel, oeffentlicher_schluessel, ausschluss=None):
     kompilate = []
     try:
         ist = _dateiliste(wurzel, ausschluss, kompilate)
-    except OSError as e:
+    except (OSError, ValueError) as e:   # ValueError: z. B. Dateiname kein gültiges UTF-8
         raise SignaturFehler(f"Bestand nicht lesbar ({e.__class__.__name__})")
     if kompilate:
         raise SignaturFehler("Kompilierte Python-Dateien gefunden (nicht geprüft, würden aber geladen): "

@@ -66,7 +66,7 @@ EXE_NAME = "Signier-Werkzeug.exe"
 # SHA-256 von Pruefmodul/signatur_pruefen.py dieses Stands über den Inhalt mit
 # LF-Zeilenenden (ein Windows-Checkout hat CRLF) - steht im Prompt zur Einbindung
 # (die Sitzung vergleicht damit); tests/test_einbindung.py prüft sie
-PRUEFMODUL_SHA256 = "e338f2a70ac50202ed80795ec27b4af86a62bf160cfef0beeb670726ea4c0c35"
+PRUEFMODUL_SHA256 = "39cb10e4f5cb718b31af4ee849144f7ff08a42c054c11aaa88ec9d55b24f3d6e"
 _VERSION_RE = re.compile(r"^(\d{1,4})\.(\d{1,4})\.(\d{1,4})$")
 _EXE_MIN, _EXE_MAX = 5 * 1024 * 1024, 150 * 1024 * 1024
 MB = 1024 * 1024
@@ -461,12 +461,33 @@ def _groesse_pruefen(inhalt, name=SIGNATUR_DATEI):
                          "Dashboard ab. Zu viele bzw. zu lange Dateinamen: Ausnahmen ergänzen. Nichts geschrieben.")
 
 
+def _version_pruefen(version):
+    """VERSION vor dem Signieren: leer (ohne Versionsangabe) oder x.y.z."""
+    if version.startswith("\ufeff"):
+        raise ValueError("VERSION beginnt mit einem BOM (unsichtbares Zeichen) - bitte ohne BOM (UTF-8) speichern. "
+                         "Nichts geschrieben.")
+    if version and not _VERSION_RE.match(version):
+        raise ValueError(f"VERSION muss die Form x.y.z haben (z. B. 1.2.3), nicht {version!r}. Nichts geschrieben.")
+
+
+def _dateiliste_zum_signieren(wurzel, profil):
+    kompilate = [] if profil.get("regel", "alle") != "speedrace" else None
+    dateien = dateiliste(wurzel, profil.get("regel", "alle"), profil.get("ausschluss"), kompilate)
+    if kompilate:   # würden nicht signiert, „Prüfen“ und das Prüfmodul lehnten sie danach ab
+        raise ValueError("Kompilierte Python-Dateien (__pycache__/, *.pyc) gefunden: " + ", ".join(kompilate[:5])
+                         + " - bitte vor dem Signieren löschen. Nichts geschrieben.")
+    if not dateien:
+        raise ValueError("Keine Dateien zum Signieren gefunden.")
+    return dateien
+
+
 def signieren(wurzel, profil, kennwort, version=None):
     privat = privat_laden(schluessel_pfad(profil), kennwort)
     if oeffentlich_text(privat) != profil.get("oeffentlich"):
         raise ValueError("Der Schlüssel passt nicht zum öffentlichen Schlüssel des Profils.")
     version = (version if version is not None else ordner_version(wurzel))[:40]
-    dateien = dateiliste(wurzel, profil.get("regel", "alle"), profil.get("ausschluss"))
+    _version_pruefen(version)
+    dateien = _dateiliste_zum_signieren(wurzel, profil)
     if not dateien:
         raise ValueError("Keine Dateien zum Signieren gefunden.")
     signatur = privat.sign(nachricht(version, dateien))
@@ -722,9 +743,8 @@ def signieren_mit_bau(wurzel, profil, kennwort, git_bau=None):
     if oeffentlich_text(privat) != profil.get("oeffentlich"):
         raise ValueError("Der Schlüssel passt nicht zum öffentlichen Schlüssel des Profils.")
     version = ordner_version(wurzel)[:40]
-    dateien = dateiliste(wurzel, profil.get("regel", "alle"), profil.get("ausschluss"))
-    if not dateien:
-        raise ValueError("Keine Dateien zum Signieren gefunden.")
+    _version_pruefen(version)
+    dateien = _dateiliste_zum_signieren(wurzel, profil)
     bau, unzulaessig = bau_dateiliste(wurzel)
     if unzulaessig:
         raise ValueError("Bau-Dateien nicht signierbar (nur normale Dateien und Ordner erlaubt): "
@@ -765,14 +785,16 @@ def signieren_mit_bau(wurzel, profil, kennwort, git_bau=None):
     atomar_schreiben(wurzel, BAU_SIGNATUR_DATEI, bau_inhalt.encode("utf-8"), 0o644, bau_gegenprobe)
     try:
         atomar_schreiben(wurzel, SIGNATUR_DATEI, inhalt.encode("utf-8"), 0o644, _signatur_json_pruefen)
-    except BaseException:
+    except Exception as e:
         try:
             if bau_alt is None:
                 os.remove(bau_pfad)
             else:
                 atomar_schreiben(wurzel, BAU_SIGNATUR_DATEI, bau_alt, 0o644)
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as e2:
+            raise ValueError(f"{SIGNATUR_DATEI} ließ sich nicht schreiben ({e}), und {BAU_SIGNATUR_DATEI} ließ sich "
+                             f"nicht zurücksetzen ({e2}): Die beiden Dateien passen jetzt nicht zusammen - bitte noch "
+                             "einmal signieren.") from e
         raise
     return version, len(dateien), inhalt, bau_inhalt, len(bau)
 
@@ -1324,7 +1346,9 @@ def github_hochladen_commit(repo, zweig, token, dateien, version, stand, baum):
             if _zweig_stand(repo, zweig, token) == commit:
                 return commit
         except ValueError:
-            pass
+            raise ValueError("Unklar, ob die Signatur auf GitHub angekommen ist (keine Antwort beim Vorspulen und beim "
+                             "Nachlesen). Bitte später noch einmal signieren - liegt sie schon dort, wird dann nur der "
+                             "Tag gesetzt. Bis dahin diese Version nicht verteilen.") from None
         raise ValueError("Der Zweig ließ sich nicht vorspulen (zwischendurch geändert oder geschützt) - "
                          "nichts veröffentlicht, bitte noch einmal signieren.") from None
     return commit
@@ -1710,6 +1734,30 @@ def ordner_oeffnen(pfad):
 # ---------------------------------------------------------------------------
 # Aktionen der Oberfläche
 # ---------------------------------------------------------------------------
+def _fremde_signatur_sichern(ordner, pr):
+    """Vor dem lokalen Signieren: Ist die vorhandene SIGNATUR.json nicht mit
+    dem Schlüssel dieses Profils signiert (z. B. falsches Profil gewählt), eine
+    Kopie im Datenordner ablegen - im Ordner selbst würde sie mitsigniert.
+    -> Pfad der Kopie oder ""."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    try:
+        daten = regulaer_lesen(os.path.join(ordner, SIGNATUR_DATEI), MAX_SIGNATUR_BYTES)
+    except (OSError, ValueError):
+        return ""
+    try:
+        sig = _signatur_json_pruefen(daten)
+        Ed25519PublicKey.from_public_bytes(base64.b64decode(pr.get("oeffentlich") or "", validate=True)).verify(
+            base64.b64decode(sig.get("signatur") or "", validate=True), nachricht(str(sig.get("version") or ""), sig["dateien"]))
+        return ""   # eigene Signatur: wird ersetzt wie immer
+    except Exception:
+        pass
+    ziel = os.path.join(daten_ordner(), "sicherung")
+    os.makedirs(ziel, mode=0o700, exist_ok=True)
+    name = f"SIGNATUR-{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}.json"
+    neu_anlegen(os.path.join(ziel, name), daten, 0o600)
+    return os.path.join(ziel, name)
+
+
 def _profil(d, pid):
     p = next((p for p in d.get("profile") or [] if p.get("id") == pid), None)
     if not p:
@@ -1719,11 +1767,12 @@ def _profil(d, pid):
 
 def _schluessel_ablegen(d, pr, pem, privat):
     neu_anlegen(schluessel_pfad(pr), pem, 0o600)   # exklusiv, folgt keiner Verknüpfung
+    vorher = pr.get("oeffentlich") or ""
     pr["oeffentlich"] = oeffentlich_text(privat)
     try:
         profile_speichern(d)
     except BaseException:
-        pr["oeffentlich"] = ""
+        pr["oeffentlich"] = vorher
         try:
             os.remove(schluessel_pfad(pr))   # sonst gälte das Profil als „mit Schlüssel“ ohne öffentlichen Schlüssel
         except OSError:
@@ -1739,7 +1788,7 @@ def _ansicht(d):
         except ValueError:
             hat = False
         profile.append({**{k: p.get(k) for k in ("id", "name", "oeffentlich", "regel", "ausschluss", "repo", "zweig")},
-                        "hat_schluessel": hat})
+                        "hat_schluessel": hat, "stand": p.get("stand", 0)})
     alt = os.path.join(os.path.expanduser("~"), "speedrace-signatur-privat.pem")
     wert = str(d.get("github_token") or "")
     gespeichert = ("dpapi" if wert.startswith("dpapi:") else "schluesselbund" if wert == "keyring:"
@@ -1834,12 +1883,23 @@ def qnap_paket(pr, token, tag, name, ziel):
         bau = bau_pruefen(ordner, pr.get("oeffentlich") or "") if pr.get("regel") == "speedrace" else {"stufe": "fehlt"}
         if bau["stufe"] == "fehler":
             raise ValueError(f"{tag}: {bau['text']} Nicht installieren.")
+        if bau["stufe"] == "fehlt" and pr.get("regel") == "speedrace" and \
+                b"--bau-pruefen" in regulaer_lesen(os.path.join(ordner, "app.py")):
+            # die signierte app.py kennt die Bau-Prüfung: Fehlen der Bau-Signatur ist kein Altbestand
+            raise ValueError(f"{tag}: {BAU_SIGNATUR_DATEI} fehlt, obwohl diese Version die Bau-Prüfung kennt - "
+                             "nicht installieren.")
         if bau["stufe"] != "fehlt" and bau["version"] != version:
             raise ValueError(f"{tag}: Version in {BAU_SIGNATUR_DATEI} passt nicht zum Tag - nicht installieren.")
         bau_signiert = set(bau_dateiliste(ordner)[0]) - set(bau["zusaetzlich"]) if bau["stufe"] != "fehlt" else set()
         eintraege = []
         _durchlaufen(ordner, "", lambda rel, n, ist_ordner: False, eintraege)
-        dateien = sorted(rel for rel, _ in eintraege)
+        alle = sorted(rel for rel, _ in eintraege)
+        # nur Signiertes übernehmen: alles andere landete sonst ungeprüft im Programmordner
+        # (z. B. eine fremde json.py, die Python vor der Standardbibliothek lädt)
+        dateien = [rel for rel in alle if rel in signiert or rel in bau_signiert
+                   or rel in (SIGNATUR_DATEI, BAU_SIGNATUR_DATEI)]
+        if not dateien:
+            raise ValueError(f"{tag}: keine signierten Dateien - nicht installieren.")
         zeit = time.localtime()[:6]
         puffer = io.BytesIO()
         with zipfile.ZipFile(puffer, "w", zipfile.ZIP_DEFLATED) as zo:
@@ -1857,8 +1917,7 @@ def qnap_paket(pr, token, tag, name, ziel):
                 zo.writestr(info, regulaer_lesen(os.path.join(ordner, *rel.split("/"))))
         daten = puffer.getvalue()
     atomar_schreiben(ziel, name + ".zip", daten, 0o600, _zip_gueltig)
-    unsigniert = [rel for rel in dateien if rel not in signiert and rel not in bau_signiert
-                  and rel not in (SIGNATUR_DATEI, BAU_SIGNATUR_DATEI)]
+    unsigniert = [rel for rel in alle if rel not in dateien]   # nicht übernommen
     return {"tag": tag, "version": version, "commit": commit, "zip": os.path.join(ziel, name + ".zip"),
             "sha256": hashlib.sha256(daten).hexdigest(), "dateien": len(dateien), "signiert": len(signiert),
             "bau_signiert": len(bau_signiert), "bau_stufe": bau["stufe"], "bau_text": bau.get("text", ""),
@@ -1934,18 +1993,32 @@ def aktion(name, p):
                                  "z. B. mit „ordner/*“.")
             werte = {"name": name_, "regel": regel, "repo": repo, "zweig": zweig, "ausschluss": ausschluss}
             if p.get("id"):
-                _profil(d, p["id"]).update(werte)
+                pr = _profil(d, p["id"])
+                if p.get("stand") is not None and str(p["stand"]) != str(pr.get("stand", 0)):
+                    # anderer Tab hat inzwischen gespeichert: nicht mit altem Formularstand überschreiben
+                    raise ValueError("Das Profil wurde inzwischen geändert (z. B. in einem anderen Tab) - "
+                                     "bitte die Seite neu laden und die Änderung erneut eintragen.")
+                pr.update(werte, stand=int(pr.get("stand", 0) or 0) + 1)
             else:
-                d.setdefault("profile", []).append({"id": secrets.token_hex(8), "oeffentlich": "", **werte})
+                d.setdefault("profile", []).append({"id": secrets.token_hex(8), "oeffentlich": "", "stand": 1, **werte})
             profile_speichern(d)
             return _ansicht(d)
         if name == "profil_loeschen":
             pr = _profil(d, p.get("id"))
+            ziel = None
             if os.path.isfile(schluessel_pfad(pr)):
                 ziel = schluessel_pfad(pr) + f".geloescht-{time.strftime('%Y%m%d-%H%M%S')}"
                 os.replace(schluessel_pfad(pr), ziel)   # nicht endgültig löschen
             d["profile"] = [x for x in d["profile"] if x is not pr]
-            profile_speichern(d)
+            try:
+                profile_speichern(d)
+            except BaseException:
+                if ziel:   # Profil bleibt - dann auch sein Schlüssel
+                    try:
+                        os.replace(ziel, schluessel_pfad(pr))
+                    except OSError:
+                        pass
+                raise
             return _ansicht(d)
         if name == "schluessel_neu":
             from cryptography.hazmat.primitives import serialization
@@ -1956,6 +2029,11 @@ def aktion(name, p):
                 raise ValueError("Das Kennwort braucht mindestens 12 Zeichen.")
             if os.path.lexists(schluessel_pfad(pr)):
                 raise ValueError("Das Profil hat schon einen Schlüssel - für einen neuen bitte ein neues Profil anlegen.")
+            if pr.get("oeffentlich"):
+                raise ValueError("Für dieses Profil ist schon ein öffentlicher Schlüssel hinterlegt, nur die Schlüsseldatei "
+                                 "fehlt. Bitte die gesicherte Schlüsseldatei (z. B. vom USB-Stick) übernehmen - ein neuer "
+                                 "Schlüssel würde die Prüfung in der eingesetzten Software brechen. Für einen neuen "
+                                 "Schlüssel bitte ein neues Profil anlegen.")
             privat = Ed25519PrivateKey.generate()
             pem = privat.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                        serialization.BestAvailableEncryption(kw.encode("utf-8")))
@@ -1971,6 +2049,9 @@ def aktion(name, p):
             privat = _privat_aus_pem(pem, str(p.get("kennwort") or ""))
             if os.path.lexists(schluessel_pfad(pr)):
                 raise ValueError("Das Profil hat schon einen Schlüssel.")
+            if pr.get("oeffentlich") and oeffentlich_text(privat) != pr["oeffentlich"]:
+                raise ValueError("Dieser Schlüssel passt nicht zum hinterlegten öffentlichen Schlüssel des Profils "
+                                 f"({pr['oeffentlich'][:12]}…) - bitte die richtige Schlüsseldatei wählen.")
             _schluessel_ablegen(d, pr, pem, privat)
             return {**_ansicht(d), "meldung": "Schlüssel übernommen. Die ursprüngliche Datei bleibt, wo sie ist."}
         if name == "token_speichern":
@@ -2051,6 +2132,7 @@ def aktion(name, p):
         ordner = str(p.get("ordner") or "").strip().strip('"')
         if not os.path.isdir(ordner):
             raise ValueError("Ordner nicht gefunden.")
+        gesichert = _fremde_signatur_sichern(ordner, pr)
         if pr.get("regel") == "speedrace":
             version, anzahl, _, bau_inhalt, bau_anzahl = signieren_mit_bau(ordner, pr, str(p.get("kennwort") or ""))
             bau_text = (f" {BAU_SIGNATUR_DATEI}: {bau_anzahl} Bau-Dateien." if bau_inhalt else
@@ -2062,6 +2144,9 @@ def aktion(name, p):
             bau_text += (" Hinweis: Das ist ein Git-Arbeitsordner - signiert wurden alle Dateien darin, auch nicht "
                          "eingecheckte (z. B. Thumbs.db, *.bak). Für genau den Stand des Repositorys „Von GitHub laden, "
                          "signieren und hochladen“ verwenden.")
+        if gesichert:
+            bau_text += (f" Die bisherige {SIGNATUR_DATEI} passte nicht zum Schlüssel dieses Profils (anderer Schlüssel "
+                         f"oder verändert) - gesichert unter {gesichert}.")
         return {"meldung": f"SIGNATUR.json geschrieben: Version {version or '(ohne)'}, {anzahl} Dateien.{bau_text}", "ok": True}
     if name == "pruefen_ordner":
         ordner = str(p.get("ordner") or "").strip().strip('"')
@@ -2089,14 +2174,15 @@ def aktion(name, p):
             else:
                 version, anzahl, inhalt = signieren(ordner, pr, str(p.get("kennwort") or ""))
                 bau_inhalt = None
-            if not _TAG_VERSION_RE.match(version or ""):
-                bom = " (die Datei beginnt mit einem BOM - bitte ohne BOM speichern)" if version.startswith("\ufeff") else ""
-                raise ValueError(f"VERSION fehlt oder ist ungültig ({version!r}){bom} - nichts hochgeladen.")
+            if not _VERSION_RE.match(version or ""):   # auch für den Tag v<Version> (Git verbietet z. B. „1..2“)
+                raise ValueError(f"VERSION fehlt oder hat nicht die Form x.y.z ({version!r}) - nichts hochgeladen.")
             dateien = {SIGNATUR_DATEI: inhalt, **({BAU_SIGNATUR_DATEI: bau_inhalt} if bau_inhalt else {})}
             github_tag_frei(pr["repo"], token, version, stand, hochladen_noetig(dateien, baum))
             commit = github_hochladen_commit(pr["repo"], pr.get("zweig") or "main", token, dateien, version, stand, baum)
-            if bau_inhalt:
+            if bau_inhalt and commit != stand:
                 bau_text = f" {BAU_SIGNATUR_DATEI} für {bau_anzahl} Bau-Dateien im selben Commit."
+            elif bau_inhalt:
+                bau_text = f" {BAU_SIGNATUR_DATEI} ({bau_anzahl} Bau-Dateien) war schon aktuell."
             elif speedrace:
                 bau_text = " Hinweis: keine Bau-Dateien (Dockerfile, tools/ …) gefunden - keine SIGNATUR-BAU.json erzeugt."
             namen = " und ".join(dateien)
@@ -2417,7 +2503,7 @@ Version __VERSION__ <button class="zweit" id="beenden">Beenden</button></div></h
   <div class="zeile" style="margin-top:12px"><button id="b-speichern">Speichern</button><button class="zweit" id="b-abbrechen">Abbrechen</button></div>
   <div id="b-schluessel" class="versteckt" style="margin-top:16px;border-top:1px solid var(--rand);padding-top:12px">
    <h2>Schlüssel dieses Profils</h2><div id="b-schluessel-info" class="hinweis"></div>
-   <div id="b-ohne"><div class="zeile"><div><label for="b-kw1">Kennwort für einen neuen Schlüssel (mind. 12 Zeichen)</label><input id="b-kw1" type="password" autocomplete="new-password"></div>
+   <div id="b-ohne"><div class="zeile" id="b-neu-zeile"><div><label for="b-kw1">Kennwort für einen neuen Schlüssel (mind. 12 Zeichen)</label><input id="b-kw1" type="password" autocomplete="new-password"></div>
     <div><label for="b-kw2">Wiederholen</label><input id="b-kw2" type="password" autocomplete="new-password"></div><button id="b-neu">Neuen Schlüssel erzeugen</button></div>
     <div class="zeile" style="margin-top:12px"><div><label for="b-pfad">… oder vorhandenen Schlüssel übernehmen (.pem)</label><input id="b-pfad"></div>
     <button class="zweit" id="b-pfad-waehlen">Datei wählen…</button></div>
@@ -2556,22 +2642,32 @@ function bearbeiten(p, vorlage) {
   $("b-regel").value = p.regel || vorlage || "alle"; $("b-repo").value = p.repo != null ? p.repo : "";
   $("b-zweig").value = p.zweig || "main"; $("b-ausschluss").value = (p.ausschluss || []).join("\n");
   $("b-aus-box").classList.toggle("versteckt", $("b-regel").value === "speedrace");
-  $("b-schluessel").classList.toggle("versteckt", !p.id);
-  $("b-einbindung").classList.toggle("versteckt", !(p.id && p.hat_schluessel && p.regel !== "speedrace"));
-  ["b-prompt-text", "b-prompt-kopieren", "b-prompt-speichern"].forEach(id => $(id).classList.add("versteckt"));
-  if (p.id) {
-    $("b-ohne").classList.toggle("versteckt", !!p.hat_schluessel);
-    $("b-schluessel-info").innerHTML = p.hat_schluessel
-      ? `Öffentlicher Schlüssel (dort eintragen, wo geprüft wird, z. B. SR_UPDATE_SCHLUESSEL):<div class="zeile" style="margin-top:6px"><div class="mono" id="b-oeff">${esc(p.oeffentlich)}</div><button class="zweit" id="b-kopieren">Kopieren</button></div>`
-      : "Dieses Profil hat noch keinen Schlüssel." + (Z.alter_schluessel ? " Gefunden: ein früher mit tools\\signieren.py erzeugter Schlüssel – unten übernehmen." : "");
-    if (!p.hat_schluessel && Z.alter_schluessel && !$("b-pfad").value) $("b-pfad").value = Z.alter_schluessel;
-    if ($("b-kopieren")) $("b-kopieren").onclick = () => navigator.clipboard.writeText(p.oeffentlich).then(() => status("b-status", "ok", "✅ Kopiert."));
-  }
+  bStand = p.id ? (p.stand || 0) : null;
+  schluesselTeil(p);
   $("bearbeiten").scrollIntoView({behavior: "smooth"});
+}
+let bStand = null;   // Stand des Profils beim Öffnen: Speichern aus einem veralteten Tab lehnt der Server ab
+function schluesselTeil(p) {   // nur Schlüssel und Einbindung - lässt ungespeicherte Formulareingaben stehen
+  $("b-schluessel").classList.toggle("versteckt", !p.id);
+  $("b-einbindung").classList.toggle("versteckt", !(p.id && p.hat_schluessel && $("b-regel").value !== "speedrace"));
+  ["b-prompt-text", "b-prompt-kopieren", "b-prompt-speichern"].forEach(id => $(id).classList.add("versteckt"));
+  if (!p.id) return;
+  $("b-ohne").classList.toggle("versteckt", !!p.hat_schluessel);
+  $("b-neu-zeile").classList.toggle("versteckt", !!p.oeffentlich);   // hinterlegter Schlüssel: nur die gesicherte Datei übernehmen
+  $("b-schluessel-info").innerHTML = p.hat_schluessel
+    ? `Öffentlicher Schlüssel (dort eintragen, wo geprüft wird, z. B. SR_UPDATE_SCHLUESSEL):<div class="zeile" style="margin-top:6px"><div class="mono" id="b-oeff">${esc(p.oeffentlich)}</div><button class="zweit" id="b-kopieren">Kopieren</button></div>`
+    : p.oeffentlich
+    ? `<b>Schlüsseldatei fehlt.</b> Hinterlegt ist der öffentliche Schlüssel <span class="mono">${esc(p.oeffentlich)}</span> – bitte die gesicherte Schlüsseldatei (z. B. vom USB-Stick) unten übernehmen. Ein neuer Schlüssel würde die Prüfung in der eingesetzten Software brechen.`
+    : "Dieses Profil hat noch keinen Schlüssel." + (Z.alter_schluessel ? " Gefunden: ein früher mit tools\\signieren.py erzeugter Schlüssel – unten übernehmen." : "");
+  if (!p.hat_schluessel && Z.alter_schluessel && !$("b-pfad").value) $("b-pfad").value = Z.alter_schluessel;
+  if ($("b-kopieren")) $("b-kopieren").onclick = () => navigator.clipboard.writeText(p.oeffentlich).then(() => status("b-status", "ok", "✅ Kopiert."));
 }
 let promptDatei = "Prompt_Einbindung.md";
 $("b-prompt").onclick = e => mit("b-status", e.target, "Speichere das Profil und erzeuge …", async () => {
+  ["b-prompt-text", "b-prompt-kopieren", "b-prompt-speichern"].forEach(id => $(id).classList.add("versteckt"));
+  if ($("b-regel").value === "speedrace") throw new Error("Für das Speedrace-Dashboard gibt es keinen Prompt – es hat die Prüfung schon eingebaut. Nichts gespeichert.");
   Z = await api("profil_speichern", profilFormular()); zeichnen();   // Prompt passt immer zum Formular
+  bStand = (Z.profile.find(x => x.id === $("b-id").value) || {}).stand;
   const d = await api("einbindung_prompt", {id: $("b-id").value});
   $("b-prompt-text").value = d.text; promptDatei = d.datei;
   ["b-prompt-text", "b-prompt-kopieren", "b-prompt-speichern"].forEach(id => $(id).classList.remove("versteckt"));
@@ -2583,13 +2679,17 @@ $("b-prompt-speichern").onclick = () => {
   a.href = URL.createObjectURL(new Blob([$("b-prompt-text").value], {type: "text/markdown;charset=utf-8"}));
   a.download = promptDatei; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 };
-$("b-regel").onchange = () => $("b-aus-box").classList.toggle("versteckt", $("b-regel").value === "speedrace");
+$("b-regel").onchange = () => {
+  $("b-aus-box").classList.toggle("versteckt", $("b-regel").value === "speedrace");
+  const p = Z.profile.find(x => x.id === $("b-id").value);
+  if (p) schluesselTeil(p);
+};
 $("neu-speedrace").onclick = () => bearbeiten(null, "speedrace");
 $("neu-allgemein").onclick = () => bearbeiten(null, "alle");
 $("b-abbrechen").onclick = () => $("bearbeiten").classList.add("versteckt");
 function profilFormular() {
   return {id: $("b-id").value, name: $("b-name").value, regel: $("b-regel").value,
-    repo: $("b-repo").value, zweig: $("b-zweig").value, ausschluss: $("b-ausschluss").value};
+    repo: $("b-repo").value, zweig: $("b-zweig").value, ausschluss: $("b-ausschluss").value, stand: bStand};
 }
 $("b-speichern").onclick = e => mit("b-status", e.target, "Speichern …", async () => {
   const neu = !$("b-id").value;
@@ -2601,13 +2701,13 @@ $("b-speichern").onclick = e => mit("b-status", e.target, "Speichern …", async
 $("b-neu").onclick = e => mit("b-status", e.target, "Schlüssel wird erzeugt …", async () => {
   if ($("b-kw1").value !== $("b-kw2").value) throw new Error("Die Kennwörter sind nicht gleich.");
   Z = await api("schluessel_neu", {id: $("b-id").value, kennwort: $("b-kw1").value});
-  $("b-kw1").value = $("b-kw2").value = ""; zeichnen(); bearbeiten(Z.profile.find(x => x.id === $("b-id").value));
+  $("b-kw1").value = $("b-kw2").value = ""; zeichnen(); schluesselTeil(Z.profile.find(x => x.id === $("b-id").value));
   status("b-status", "ok", "✅ " + esc(Z.meldung));
 });
 $("b-pfad-waehlen").onclick = async () => { try { const d = await api("datei_waehlen"); if (d.pfad) $("b-pfad").value = d.pfad; } catch (e) { alert(e.message); } };
 $("b-import").onclick = e => mit("b-status", e.target, "Schlüssel wird geprüft …", async () => {
   Z = await api("schluessel_import", {id: $("b-id").value, pfad: $("b-pfad").value, kennwort: $("b-pfad-kw").value});
-  $("b-pfad-kw").value = ""; zeichnen(); bearbeiten(Z.profile.find(x => x.id === $("b-id").value));
+  $("b-pfad-kw").value = ""; zeichnen(); schluesselTeil(Z.profile.find(x => x.id === $("b-id").value));
   status("b-status", "ok", "✅ " + esc(Z.meldung));
 });
 $("daten-oeffnen").onclick = () => api("ordner_oeffnen", {was: "daten"}).catch(e => alert(e.message));
@@ -2771,7 +2871,7 @@ function qZeichnen() {
         : ` Bau-Signatur gültig (${k.bau_signiert} Bau-Dateien)${k.bau_stufe === "warn" ? " – Hinweis: " + esc(k.bau_text) : ""}.`;
       h += `<div class="status ok">✅ ${esc(k.tag)} – Signatur gültig (${k.signiert} signierte Dateien).${bauT} Commit <span class="mono">${esc(k.commit.slice(0, 7))}</span>,
         ZIP-Prüfsumme <span class="mono">${esc(k.sha256)}</span>.<details style="margin-top:6px"><summary>${k.unsigniert_anzahl} Dateien nicht von der Signatur erfasst
-        (aus demselben Tag-Commit, gelangen nicht ins Image)</summary><div class="mono hinweis">${k.unsigniert.map(esc).join("<br>")}</div></details></div>`;
+        (aus demselben Tag-Commit – nicht in die ZIP übernommen)</summary><div class="mono hinweis">${k.unsigniert.map(esc).join("<br>")}</div></details></div>`;
     }
     if (s.fehler.length) h += `<details ${st === "fehler" ? "open" : ""} style="margin-top:8px"><summary class="hinweis">Typische Fehler und Abhilfe</summary><ul>`
       + s.fehler.map(f => `<li><span class="mono">${esc(f[0])}</span> – ${esc(f[1])}</li>`).join("") + "</ul></details>";
