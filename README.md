@@ -175,6 +175,8 @@ Kennwort sicher aufbewahren. Private Schlüssel gehören nie in dieses Repositor
 
 ## Hilfe und Copyright
 
-Das „i“ neben der Versionsnummer öffnet ein kurzes Handbuch in der Oberfläche.
+Das „i“ neben der Versionsnummer öffnet ein kurzes Handbuch in der Oberfläche; „Als PDF
+speichern“ druckt genau diese Fassung (im Druckdialog „Als PDF speichern“ wählen). Als Datei:
+[Handbuch.pdf](Handbuch.pdf).
 
 © 2026 Hans-Christoph Rose. Alle Rechte vorbehalten.

@@ -48,7 +48,7 @@ import einbindung_prompt
 import qnap_begleiter as Q
 
 PROGRAMM = "Signier-Werkzeug"
-VERSION = "1.2.7"
+VERSION = "1.2.8"
 FORMAT = "sr-signatur-1"
 SIGNATUR_DATEI = "SIGNATUR.json"
 BINAER = (".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".otf")
@@ -2688,7 +2688,14 @@ textarea{min-height:70px;font-family:Consolas,monospace;font-size:13px}
 button{padding:8px 14px;border-radius:8px;border:1px solid var(--akzent);background:var(--akzent);color:#fff;font:inherit;cursor:pointer}
 button.zweit{background:transparent;color:var(--text);border-color:var(--rand)}
 button.info{width:26px;height:26px;padding:0;border-radius:50%;font:italic 700 14px Georgia,serif}
-#hb-dialog h3{font-size:15px;margin:16px 0 4px}#hb-dialog p,#hb-dialog li{font-size:13.5px;line-height:1.5}button:disabled{opacity:.5;cursor:wait}
+#hb-dialog h3{font-size:15px;margin:16px 0 4px}#hb-dialog p,#hb-dialog li{font-size:13.5px;line-height:1.5}
+@media print{body.hb-druck>*:not(#hb-dialog){display:none !important}
+ body.hb-druck{background:#fff !important;color:#000 !important}
+ body.hb-druck #hb-dialog{position:static !important;display:block !important;background:none !important}
+ body.hb-druck #hb-dialog .karte{width:auto !important;max-height:none !important;overflow:visible !important;border:0;background:#fff;color:#000;padding:0}
+ body.hb-druck #hb-dialog button{display:none !important}body.hb-druck #hb-dialog .mono{color:#000;background:none;word-break:normal;overflow-wrap:normal}
+ body.hb-druck #hb-dialog h2,body.hb-druck #hb-dialog h3{break-after:avoid}body.hb-druck #hb-dialog li{break-inside:avoid}
+ body.hb-druck #hb-dialog p[style]{color:#333 !important}@page{margin:18mm}}button:disabled{opacity:.5;cursor:wait}
 .zeile{display:flex;gap:8px;align-items:end;flex-wrap:wrap}.zeile>*{flex:1 1 200px}.zeile>button{flex:0 0 auto}
 .hinweis{font-size:13px;color:var(--leise)}.mono{font-family:Consolas,monospace;word-break:break-all}
 .status{margin-top:12px;padding:10px 12px;border-radius:8px;display:none}.status.ok{display:block;background:#14532d;border:1px solid var(--ok)}
@@ -2823,7 +2830,8 @@ Version __VERSION__ <button class="zweit info" id="info-knopf" title="Handbuch u
 <div id="hb-dialog" class="versteckt" role="dialog" aria-modal="true" aria-labelledby="hb-titel" style="position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:10">
  <div class="karte" style="width:min(760px,94vw);max-height:88vh;overflow:auto">
  <div class="zeile" style="align-items:center"><h2 id="hb-titel" style="margin:0">Handbuch – Signier-Werkzeug __VERSION__</h2>
-  <button class="zweit" id="hb-zu" style="margin-left:auto">Schließen</button></div>
+  <button class="zweit" id="hb-pdf" style="margin-left:auto" title="Im Druckdialog „Als PDF speichern“ wählen">Als PDF speichern</button>
+  <button class="zweit" id="hb-zu">Schließen</button></div>
  <p>Das Werkzeug signiert Programmversionen mit einem eigenen Schlüssel (Ed25519), damit die eingesetzte
  Software nur Versionen annimmt, die wirklich vom Herausgeber stammen. Der private Schlüssel verlässt diesen
  Rechner nie; er liegt mit Kennwort verschlüsselt im Datenordner.</p>
@@ -3023,6 +3031,11 @@ function handbuch(auf) {
 }
 $("info-knopf").onclick = () => handbuch(true);
 $("hb-zu").onclick = () => handbuch(false);
+$("hb-pdf").onclick = () => {   // Druckansicht nur des Handbuchs - im Dialog „Als PDF speichern“ wählen
+  document.body.classList.add("hb-druck");
+  const weg = () => { document.body.classList.remove("hb-druck"); window.removeEventListener("afterprint", weg); };
+  window.addEventListener("afterprint", weg); window.print();
+};
 $("hb-dialog").onclick = ev => { if (ev.target === $("hb-dialog")) handbuch(false); };
 document.addEventListener("keydown", ev => { if (ev.key === "Escape" && !$("hb-dialog").classList.contains("versteckt")) handbuch(false); });
 $("daten-oeffnen").onclick = () => api("ordner_oeffnen", {was: "daten"}).catch(e => alert(e.message));

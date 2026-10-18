@@ -245,6 +245,8 @@ class HandbuchTests(unittest.TestCase):
         hb = W.SEITE.split('id="hb-dialog"')[1].split('id="kw-dialog"')[0]
         for teil in ("Handbuch", "Profile &amp; Schlüssel", "Signieren", "Prüfen", "QNAP", "© 2026 Hans-Christoph Rose"):
             self.assertIn(teil, hb)
+        self.assertIn('id="hb-pdf"', hb)
+        self.assertIn("@media print{body.hb-druck", W.SEITE)
 
 
 class HochladenMeldungTests(unittest.TestCase):
