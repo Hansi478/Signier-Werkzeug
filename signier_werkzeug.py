@@ -1520,6 +1520,12 @@ def _gh_hochladen(release_id, name, daten, token):
         raise ValueError(f"SIGNATUR.json konnte nicht hochgeladen werden (GitHub-Fehler {e.code}).") from None
 
 
+# Text des Entwurfs, wie ihn bauen.yml (printf) schreibt - tests/test_runde3.py prüft beides zusammen
+_ENTWURF_COMMIT_RE = re.compile(r"Commit ([0-9a-f]{40})")
+_ENTWURF_SUMME_RE = re.compile(r"SHA-256 der exe: ([0-9a-f]{64})")
+_ENTWURF_LAUF_RE = re.compile(r"Gebaut von: (https://github\.com/[\w./-]+/actions/runs/\d+)")
+
+
 def entwurf_herkunft(rel, token, exe):
     """Herkunft des Entwurfs prüfen, bevor er signiert wird -> Commit.
     - Prüfsumme der geladenen exe = die vom Bau in den Release-Text geschriebene
@@ -1527,8 +1533,8 @@ def entwurf_herkunft(rel, token, exe):
     - der Tag zeigt genau auf den Commit, aus dem gebaut wurde,
     - dieser Commit liegt auf main (kein Bau aus einem fremden Zweig)."""
     text = str(rel.get("body") or "")
-    m_commit = re.search(r"Commit ([0-9a-f]{40})", text)
-    m_summe = re.search(r"SHA-256 der exe: ([0-9a-f]{64})", text)
+    m_commit = _ENTWURF_COMMIT_RE.search(text)
+    m_summe = _ENTWURF_SUMME_RE.search(text)
     if not m_commit or not m_summe:
         raise ValueError("Der Entwurf stammt nicht erkennbar aus dem Bau (Commit oder Prüfsumme fehlen) - nicht signiert.")
     summe = hashlib.sha256(exe).hexdigest()
@@ -1584,7 +1590,7 @@ def werkzeug_veroeffentlichen(profil, kennwort, token):
         _gh(f"/repos/{WERKZEUG_REPO}/releases/assets/{int(alt['id'])}", token, "DELETE", roh=True)
     _gh_hochladen(rel["id"], SIGNATUR_DATEI, inhalt.encode("utf-8"), token)
     summe = hashlib.sha256(exe).hexdigest()
-    m_lauf = re.search(r"Gebaut von: (https://github\.com/[\w./-]+/actions/runs/\d+)", str(rel.get("body") or ""))
+    m_lauf = _ENTWURF_LAUF_RE.search(str(rel.get("body") or ""))
     _gh(f"/repos/{WERKZEUG_REPO}/releases/{int(rel['id'])}", token, "PATCH",
         {"draft": False, "make_latest": "true", "body": veroeffentlicht_text(version, commit, summe, m_lauf.group(1) if m_lauf else "")})
     return version, summe, commit

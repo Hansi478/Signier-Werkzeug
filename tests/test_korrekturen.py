@@ -321,8 +321,6 @@ class QnapPaketPycTests(unittest.TestCase):
             t.tearDown()
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 # ---------------------------------------------------------------------------
@@ -652,3 +650,7 @@ class InstanzTests(Basis):
             self.assertEqual(r.returncode, 3)
         finally:
             os.close(W._INSTANZ.pop("fd"))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -36,7 +36,8 @@ jobs:
 
       - name: Paket cryptography
         if: runner.os != 'Windows'
-        run: python -m pip install --disable-pip-version-check "cryptography==50.0.2"
+        # dieselbe Version wie in der exe (requirements-bau.txt, von Dependabot gepflegt)
+        run: python -m pip install --disable-pip-version-check "$(grep -E '^cryptography==' requirements-bau.txt | cut -d' ' -f1)"
 
       - name: Tests
         run: python -m unittest discover -s tests -v
@@ -83,10 +84,13 @@ jobs:
         env:
           COMMIT: ${{ github.sha }}
           SUMME: ${{ steps.summe.outputs.sha256 }}
+          LAUF: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          printf 'Ungeprüfter Entwurf aus Commit %s.\n\nSHA-256 der exe: %s\n' "$COMMIT" "$SUMME" > notizen.txt
+          printf 'Ungeprüfter Entwurf aus Commit %s.\n\nSHA-256 der exe: %s\n\nGebaut von: %s\n\nWird erst sichtbar, wenn er im Signier-Werkzeug signiert und veröffentlicht wurde.\n' \
+            "$COMMIT" "$SUMME" "$LAUF" > notizen.txt
           grep -Eq "^Ungeprüfter Entwurf aus Commit [0-9a-f]{40}\.$" notizen.txt
           grep -Eq "^SHA-256 der exe: [0-9a-f]{64}$" notizen.txt
+          grep -Eq "^Gebaut von: https://github\.com/.+/actions/runs/[0-9]+$" notizen.txt
           gh --version
           gh release create --help | grep -q -- "--verify-tag"
           gh release create --help | grep -q -- "--notes-file"

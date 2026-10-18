@@ -179,6 +179,64 @@ class OberflaecheTests(Basis):
                 pass
 
 
+class TestsUndWorkflowsTests(Basis):
+    """N32-N36."""
+
+    def lesen(self, *teile):
+        with open(os.path.join(os.path.dirname(HIER), *teile), encoding="utf-8") as f:
+            return f.read()
+
+    def test_seite_ueber_den_server_mit_festen_ausnahmen(self):
+        import html
+        import http.client
+        import threading
+        server = W.Server()
+        t = threading.Thread(target=server.httpd.serve_forever, daemon=True)
+        t.start()
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", server.port, timeout=10)
+            c.request("GET", "/?t=" + server.token, headers={"Host": f"127.0.0.1:{server.port}"})
+            seite = c.getresponse().read().decode("utf-8")
+            self.assertNotIn("__AUSGENOMMEN__", seite)
+            self.assertIn(html.escape("  ".join(W.STANDARD_AUSSCHLUSS)), seite)
+        finally:
+            server.httpd.shutdown()
+            server.httpd.server_close()
+
+    def test_entwurfstext_aus_bauen_yml_wird_erkannt(self):
+        import re
+        for name in ("bauen.yml", "pruefen.yml"):
+            with self.subTest(name=name):
+                yml = self.lesen(".github", "workflows", name)
+                vorlage = re.search(r"printf '(Ungeprüfter Entwurf[^']*)'", yml).group(1)
+                commit, summe, lauf = "a" * 40, "b" * 64, "https://github.com/Besitzer/Name/actions/runs/123"
+                text = vorlage.replace("\\n", "\n") % (commit, summe, lauf)   # wie printf
+                self.assertEqual(W._ENTWURF_COMMIT_RE.search(text).group(1), commit)
+                self.assertEqual(W._ENTWURF_SUMME_RE.search(text).group(1), summe)
+                self.assertEqual(W._ENTWURF_LAUF_RE.search(text).group(1), lauf)
+
+    def test_cryptography_wie_in_der_exe(self):
+        yml = self.lesen(".github", "workflows", "pruefen.yml")
+        self.assertNotRegex(yml, r"cryptography==\d")   # Version kommt aus requirements-bau.txt
+        self.assertIn("grep -E '^cryptography==' requirements-bau.txt", yml)
+        self.assertRegex(self.lesen("requirements-bau.txt"), r"(?m)^cryptography==\d+\.\d+\.\d+ ")
+
+    @unittest.skipUnless(os.name == "nt", "nur unter Windows")
+    def test_echte_junction(self):
+        import _winapi
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("signatur_pruefen", os.path.join(
+            os.path.dirname(HIER), "Pruefmodul", "signatur_pruefen.py"))
+        P = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(P)
+        self.schreiben("a.txt", b"1")
+        self.schreiben("ziel/b.txt", b"2")
+        ordner = os.path.join(self.tmp, "ordner")
+        _winapi.CreateJunction(os.path.join(ordner, "ziel"), os.path.join(ordner, "link"))
+        self.assertRaisesRegex(ValueError, "Verknüpfung", W.dateiliste, ordner, "alle", [])
+        self.assertRaises(P.SignaturFehler, P._dateiliste, ordner, [])
+
+
 class HochladenMeldungTests(unittest.TestCase):
     """N12: verlorene Antwort beim Vorspulen und beim Nachlesen."""
 

@@ -906,6 +906,8 @@ class WorkflowTests(unittest.TestCase):
                 self.assertNotIn("secrets.", code)
                 for block in re.findall(r"run: \|\n((?:\s{10,}.*\n)+)", text):
                     self.assertNotIn("${{", block, "Ausdruck direkt im Skript (Injektion) - über env übergeben")
+                for zeile in re.findall(r"^\s*(?:- )?run: (?![|>])(.+)$", text, re.M):   # einzeilige Skripte
+                    self.assertNotIn("${{", zeile, "Ausdruck direkt im Skript (Injektion) - über env übergeben")
         bauen = self.lesen("bauen.yml")
         self.assertIn("contents: write", bauen.split("entwurf:")[1])
         self.assertNotIn("contents: write", bauen.split("entwurf:")[0])
