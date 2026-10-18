@@ -99,6 +99,23 @@ Für Profile „Speedrace-Dashboard“ gilt eine zweite, eigene Regel - genau wi
   `SR_DASHBOARD_ORDNER=<entpackter Stand ab 1.8.8>` zusätzlich gegen das echte
   `tools/signieren.py pruefen` und `app.py --bau-pruefen` (beide müssen 0 liefern).
 
+### Paketliste (SIGNATUR-PAKETE.json)
+
+Format `sr-pakete-signatur-1`, genau wie im Dashboard (`tools/signieren.py`: `pakete_pruefsumme`,
+`pakete_nachricht`; `app.py`: `_pakete_liste_pruefen`):
+
+- `lock_sha256`: SHA-256 (hex, klein) über `PAKETE.lock`, ohne Nullbyte vorher CRLF → LF.
+- Signiert wird `json.dumps({"format", "programmversion", "lock_sha256", "erstellt"},
+  sort_keys=True, separators=(",", ":"), ensure_ascii=False)` als UTF-8; `erstellt` ist das
+  lokale Datum `JJJJ-MM-TT`. Gegenprobe mit strengem Base64.
+- Die Programmversion kommt aus der Kopfzeile `# Programmversion: x.y.z`. Zusätzlich verlangt
+  das Werkzeug, dass der Tag `v<Version>` existiert und dort eine gültige `SIGNATUR.json` dieses
+  Profils für genau diese Version liegt; `requirements.lock` des Tags (für die Anzeige der
+  Unterschiede) muss zu dieser Signatur passen. Dateien kommen über ihren Git-Blob (Prüfsumme
+  gegen den Git-Baum).
+- Signiert wird genau die angezeigte Liste: Hat sie sich seit „Prüfen“ geändert, bricht das
+  Werkzeug ab. Hochgeladen wird in einem Commit auf den Zweig `pakete` (nur vorspulen).
+
 ## 3. SIGNATUR.json und andere Dateien schreiben
 
 `atomar_schreiben()` schreibt jede Datei so:

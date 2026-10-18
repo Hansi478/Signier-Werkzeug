@@ -1432,6 +1432,172 @@ def github_tag_setzen(repo, token, version, commit):
 # ---------------------------------------------------------------------------
 # Eigene Versionen: Release signieren und veröffentlichen, Update einspielen
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Paketliste (SIGNATUR-PAKETE.json) für das Speedrace-Dashboard: neuere Python-
+# Pakete ohne neue Programmversion. Eine GitHub-Action legt die getestete
+# PAKETE.lock auf den Zweig „pakete“; das Werkzeug signiert sie dort. Nichts an
+# main, kein Tag. Genau wie im Dashboard (tools/signieren.py: pakete_pruefsumme,
+# pakete_nachricht; app.py: _pakete_liste_pruefen).
+# ---------------------------------------------------------------------------
+PAKETE_FORMAT = "sr-pakete-signatur-1"
+PAKETE_DATEI = "PAKETE.lock"
+PAKETE_SIGNATUR_DATEI = "SIGNATUR-PAKETE.json"
+PAKETE_ZWEIG = "pakete"
+PAKETE_MAX = 1 * MB
+_PAKETE_KOPF_RE = re.compile(r"^# Programmversion: (\S+)", re.M)
+_PAKET_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?==([^\s;\\]+)", re.M)
+
+
+def pakete_pruefsumme(daten):
+    """SHA-256 (hex, klein) der Datei-Bytes, ohne Nullbyte vorher CRLF -> LF."""
+    if b"\0" not in daten:
+        daten = daten.replace(b"\r\n", b"\n")
+    return hashlib.sha256(daten).hexdigest()
+
+
+def pakete_nachricht(version, summe, erstellt):
+    return json.dumps({"format": PAKETE_FORMAT, "programmversion": version, "lock_sha256": summe, "erstellt": erstellt},
+                      sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def pakete_version(daten):
+    """Programmversion aus der Kopfzeile „# Programmversion: <Version>“."""
+    try:
+        text = daten.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError(f"{PAKETE_DATEI} ist kein UTF-8-Text - nicht signiert.")
+    m = _PAKETE_KOPF_RE.search(text)
+    version = m.group(1)[:40] if m else ""
+    if not _VERSION_RE.match(version):
+        raise ValueError(f"{PAKETE_DATEI}: keine gültige Kopfzeile „# Programmversion: x.y.z“ - nicht signiert.")
+    return version
+
+
+def pakete_signatur_bauen(privat, version, summe, erstellt):
+    """-> Inhalt von SIGNATUR-PAKETE.json (mit Gegenprobe, Base64 streng)."""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", erstellt):
+        raise ValueError("Ungültiges Datum.")
+    inhalt = json.dumps({"format": PAKETE_FORMAT, "programmversion": version, "lock_sha256": summe, "erstellt": erstellt,
+                         "signatur": base64.b64encode(privat.sign(pakete_nachricht(version, summe, erstellt))).decode("ascii")},
+                        indent=1, sort_keys=True) + "\n"
+    sig = json.loads(inhalt)
+    privat.public_key().verify(base64.b64decode(sig["signatur"], validate=True),
+                               pakete_nachricht(sig["programmversion"], sig["lock_sha256"], sig["erstellt"]))
+    return inhalt
+
+
+def pakete_signatur_gueltig(daten, oeffentlich, summe, version):
+    """Ist SIGNATUR-PAKETE.json gültig signiert und gehört genau zu dieser Liste?
+    (wie _pakete_liste_pruefen im Dashboard)"""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    try:
+        sig = json.loads(daten.decode("utf-8"))
+        felder = ("format", "programmversion", "lock_sha256", "erstellt", "signatur")
+        if not isinstance(sig, dict) or sig.get("format") != PAKETE_FORMAT or \
+                not all(isinstance(sig.get(k), str) for k in felder):
+            return False
+        Ed25519PublicKey.from_public_bytes(base64.b64decode(oeffentlich, validate=True)).verify(
+            base64.b64decode(sig["signatur"], validate=True),
+            pakete_nachricht(sig["programmversion"], sig["lock_sha256"], sig["erstellt"]))
+    except Exception:
+        return False
+    return sig["lock_sha256"] == summe and sig["programmversion"] == version
+
+
+def _pakete_stand(text):
+    """{Paketname (normalisiert): Version} aus einer Lock-Datei."""
+    return {re.sub(r"[-_.]+", "-", n).lower(): v for n, v in _PAKET_RE.findall(text)}
+
+
+def pakete_unterschiede(alt, neu):
+    """Unterschiede der Paketversionen, z. B. „pypdf 6.20.1 → 6.21.1“."""
+    a, n = _pakete_stand(alt), _pakete_stand(neu)
+    out = [f"{k} {a[k]} → {n[k]}" for k in sorted(a.keys() & n.keys()) if a[k] != n[k]]
+    out += [f"{k} {n[k]} (neu)" for k in sorted(n.keys() - a.keys())]
+    out += [f"{k} {a[k]} (entfällt)" for k in sorted(a.keys() - n.keys())]
+    return out
+
+
+def _blob(repo, token, baum, pfad, limit):
+    """Inhalt einer Datei aus einem Git-Baum (über ihren Blob) oder None."""
+    e = next((x for x in baum if x.get("path") == pfad and x.get("type") == "blob"), None)
+    if not e:
+        return None
+    if int(e.get("size") or 0) > limit:
+        raise ValueError(f"{pfad} ist zu groß.")
+    d = _gh(f"/repos/{repo}/git/blobs/{e.get('sha')}", token)
+    try:
+        daten = base64.b64decode(str(d.get("content") or ""))   # GitHub bricht die Zeilen um
+    except ValueError:
+        raise ValueError(f"Unerwartete Antwort von GitHub ({pfad}).")
+    if _git_blob_sha(daten) != e.get("sha"):
+        raise ValueError(f"{pfad}: Inhalt passt nicht zum Git-Baum - abgebrochen.")
+    return daten
+
+
+def pakete_stand(pr, token):
+    """Paketliste auf dem Zweig „pakete“ laden und vorprüfen (ohne Kennwort)
+    -> Angaben für die Anzeige und zum Signieren. Abbruch, wenn es keine Liste
+    gibt oder sie zu keiner signierten Programmversion gehört."""
+    repo = pr.get("repo") or ""
+    if pr.get("regel") != "speedrace" or not _REPO_RE.match(repo):
+        raise ValueError("Paketlisten gibt es nur für Profile „Speedrace-Dashboard“ mit GitHub-Repository.")
+    try:
+        stand = _zweig_stand(repo, PAKETE_ZWEIG, token)
+    except GitHubFehler as e:
+        if e.code == 404:
+            raise ValueError(f"Keine Paketliste zum Signieren (kein Zweig „{PAKETE_ZWEIG}“).") from None
+        raise
+    baum = github_baum(repo, token, stand)
+    lock = _blob(repo, token, baum, PAKETE_DATEI, PAKETE_MAX)
+    if lock is None:
+        raise ValueError(f"Keine Paketliste zum Signieren ({PAKETE_DATEI} fehlt auf dem Zweig „{PAKETE_ZWEIG}“).")
+    version = pakete_version(lock)
+    summe = pakete_pruefsumme(lock)
+    # die Liste muss zu einer signierten Programmversion gehören
+    tag_commit = _tag_commit(repo, token, "v" + version)
+    if not re.fullmatch(r"[0-9a-f]{40}", tag_commit or ""):
+        raise ValueError(f"Die Liste gehört zu Version {version}, aber den Tag v{version} gibt es nicht - nicht signiert.")
+    tag_baum = github_baum(repo, token, tag_commit)
+    sig_daten = _blob(repo, token, tag_baum, SIGNATUR_DATEI, MAX_SIGNATUR_BYTES)
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        sig = _signatur_json_pruefen(sig_daten or b"")
+        Ed25519PublicKey.from_public_bytes(base64.b64decode(pr.get("oeffentlich") or "", validate=True)).verify(
+            base64.b64decode(sig.get("signatur") or "", validate=True), nachricht(str(sig.get("version") or ""), sig["dateien"]))
+        if str(sig.get("version") or "") != version:
+            raise ValueError
+    except Exception:
+        raise ValueError(f"Tag v{version} trägt keine gültige Signatur dieses Profils für Version {version} - "
+                         "Paketliste nicht signiert.") from None
+    alt = _blob(repo, token, tag_baum, "requirements.lock", PAKETE_MAX)
+    if alt is not None and sig["dateien"].get("requirements.lock") != pakete_pruefsumme(alt):
+        raise ValueError(f"requirements.lock im Tag v{version} passt nicht zur Signatur - abgebrochen.")
+    vorhanden = _blob(repo, token, baum, PAKETE_SIGNATUR_DATEI, MAX_SIGNATUR_BYTES)
+    return {"repo": repo, "stand": stand, "baum": baum, "version": version, "summe": summe,
+            "unterschiede": pakete_unterschiede(alt.decode("utf-8", "replace") if alt else "", lock.decode("utf-8")),
+            "bereits": bool(vorhanden) and pakete_signatur_gueltig(vorhanden, pr.get("oeffentlich") or "", summe, version)}
+
+
+def pakete_signieren(pr, kennwort, token, summe_gesehen):
+    """Die angezeigte Liste signieren und SIGNATUR-PAKETE.json in einem Commit
+    auf den Zweig „pakete“ hochladen (nur vorspulen) -> Meldung."""
+    st = pakete_stand(pr, token)
+    if st["summe"] != summe_gesehen:
+        raise ValueError("Die Paketliste hat sich seit der Anzeige geändert - bitte erneut prüfen. Nichts signiert.")
+    if st["bereits"]:
+        return f"Paketliste für Version {st['version']} ist bereits signiert - nichts geändert."
+    privat = privat_laden(schluessel_pfad(pr), kennwort)
+    if oeffentlich_text(privat) != pr.get("oeffentlich"):
+        raise ValueError("Der Schlüssel passt nicht zum öffentlichen Schlüssel des Profils.")
+    erstellt = time.strftime("%Y-%m-%d")
+    inhalt = pakete_signatur_bauen(privat, st["version"], st["summe"], erstellt)
+    commit = github_hochladen_commit(st["repo"], PAKETE_ZWEIG, token, {PAKETE_SIGNATUR_DATEI: inhalt},
+                                     f"{st['version']} ({erstellt})", st["stand"], st["baum"])
+    return (f"Paketliste für Version {st['version']} signiert, {PAKETE_SIGNATUR_DATEI} auf den Zweig „{PAKETE_ZWEIG}“ "
+            f"hochgeladen (Commit {commit[:7]}). Die Dashboards mit Version {st['version']} bieten das Paket-Update an.")
+
+
 def _version_tupel(v):
     m = _VERSION_RE.match(str(v or ""))
     return tuple(int(x) for x in m.groups()) if m else None
@@ -2213,6 +2379,15 @@ def aktion(name, p):
             raise ValueError("Ordner nicht gefunden.")
         return {"pruefung": pruefen(ordner, pr.get("oeffentlich") or "", pr.get("regel", "alle"), pr.get("ausschluss")),
                 "bau": bau_pruefen(ordner, pr.get("oeffentlich") or "") if pr.get("regel") == "speedrace" else None}
+    if name == "pakete_pruefen":
+        if not token:
+            raise ValueError("Dazu wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
+        st = pakete_stand(pr, token)
+        return {k: st[k] for k in ("version", "summe", "unterschiede", "bereits")}
+    if name == "pakete_signieren":
+        if not token:
+            raise ValueError("Dazu wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
+        return {"ok": True, "meldung": pakete_signieren(pr, str(p.get("kennwort") or ""), token, str(p.get("summe") or ""))}
     if name in ("signieren_github", "pruefen_github"):
         if not pr.get("repo"):
             raise ValueError("Im Profil ist kein GitHub-Repository eingetragen.")
@@ -2534,6 +2709,10 @@ Version __VERSION__ <button class="zweit" id="beenden">Beenden</button></div></h
   <label for="s-profil">Profil (Software)</label><select id="s-profil"></select>
   <div class="zeile" style="margin-top:12px"><button id="s-github">Von GitHub laden, signieren und hochladen</button></div>
   <div class="hinweis" id="s-github-info" style="margin-top:6px"></div>
+  <div id="s-pakete" class="versteckt" style="margin-top:12px"><button class="zweit" id="s-pakete-pruefen">Paketliste prüfen</button>
+   <span class="hinweis">neuere Python-Pakete vom Zweig „pakete“ (ohne neue Programmversion)</span>
+   <div id="s-pakete-info" class="hinweis" style="margin-top:6px"></div>
+   <div class="zeile versteckt" id="s-pakete-los-zeile" style="margin-top:6px"><button id="s-pakete-los">Paketliste signieren und hochladen</button></div></div>
   <details style="margin-top:14px"><summary class="hinweis">… oder einen Ordner auf diesem Rechner signieren</summary>
    <div class="zeile"><div><label for="s-ordner">Ordner</label><input id="s-ordner" placeholder="C:\…\Ordner der Version"></div>
    <button class="zweit" data-waehle="s-ordner">Ordner wählen…</button></div>
@@ -2697,7 +2876,30 @@ function zeichnen() {
 function profilInfo() {
   const p = Z.profile.find(x => x.id === $("s-profil").value);
   $("s-github-info").textContent = p ? (p.repo ? `Repository ${p.repo}, Zweig ${p.zweig || "main"}` : "Im Profil ist kein GitHub-Repository eingetragen.") : "";
+  $("s-pakete").classList.toggle("versteckt", !(p && p.regel === "speedrace" && p.repo));
+  $("s-pakete-info").innerHTML = ""; $("s-pakete-los-zeile").classList.add("versteckt"); paketeSumme = "";
 }
+let paketeSumme = "";   // genau die angezeigte Liste wird signiert
+$("s-pakete-pruefen").onclick = e => mit("s-status", e.target, "Lade die Paketliste …", async () => {
+  const p = profilPruefen($("s-profil").value);
+  const d = await api("pakete_pruefen", {id: p.id});
+  paketeSumme = d.bereits ? "" : d.summe;
+  $("s-pakete-info").innerHTML = `Programmversion <b>${esc(d.version)}</b>, Prüfsumme <span class="mono">${esc(d.summe)}</span>. `
+    + (d.unterschiede.length ? "Änderungen gegenüber v" + esc(d.version) + ":<ul>" + d.unterschiede.map(u => `<li class="mono">${esc(u)}</li>`).join("") + "</ul>"
+       : "Keine Änderungen gegenüber v" + esc(d.version) + ". ");
+  $("s-pakete-los-zeile").classList.toggle("versteckt", !!d.bereits);
+  status("s-status", "ok", d.bereits ? "✅ Diese Paketliste ist bereits signiert – nichts zu tun." : "✅ Paketliste geprüft – bitte die Änderungen ansehen und dann signieren.");
+});
+$("s-pakete-los").onclick = async e => {
+  let p; try { p = profilPruefen($("s-profil").value); } catch (err) { return status("s-status", "fehler", "❌ " + esc(err.message)); }
+  if (!paketeSumme) return status("s-status", "fehler", "❌ Erst „Paketliste prüfen“.");
+  const kw = await kennwort(`${p.name}: angezeigte Paketliste signieren und SIGNATUR-PAKETE.json auf den Zweig „pakete“ hochladen.`);
+  if (kw === null) return;
+  mit("s-status", e.target, "Signiere und lade hoch …", async () => {
+    const d = await api("pakete_signieren", {id: p.id, kennwort: kw, summe: paketeSumme});
+    $("s-pakete-los-zeile").classList.add("versteckt"); paketeSumme = "";
+    status("s-status", "ok", "✅ " + esc(d.meldung)); });
+};
 $("s-profil").onchange = profilInfo;
 function bearbeiten(p, vorlage) {
   p = p || {}; $("bearbeiten").classList.remove("versteckt"); $("b-status").className = "status";

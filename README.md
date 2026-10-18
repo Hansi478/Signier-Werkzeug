@@ -82,6 +82,17 @@ Symbolische Links oder Submodule im Bau-Bereich brechen das Signieren ab. Älter
 ohne Bau-Dateien bekommen keine `SIGNATUR-BAU.json` (Hinweis). „Prüfen“ zeigt die Bau-Dateien
 in einer eigenen Zeile (Abweichung bei `docker-compose.yml` nur Hinweis).
 
+### Paketliste (`SIGNATUR-PAKETE.json`)
+
+Neuere Python-Pakete ohne neue Programmversion: Eine GitHub-Action des Dashboards legt eine
+getestete `PAKETE.lock` auf den Zweig `pakete`. Im Reiter „Signieren“ (Profil
+Speedrace-Dashboard) zeigt **„Paketliste prüfen“** Programmversion, Prüfsumme und die geänderten
+Paketversionen gegenüber `requirements.lock` im Tag `v<Version>`. **„Paketliste signieren und
+hochladen“** signiert genau diese Liste (Format `sr-pakete-signatur-1`, gleicher Schlüssel) und
+lädt `SIGNATUR-PAKETE.json` in einem Commit auf den Zweig `pakete`. Nichts an main, kein Tag.
+Abgebrochen wird, wenn es den Tag `v<Version>` nicht gibt oder er keine gültige Signatur dieses
+Profils trägt; eine schon gültig signierte Liste wird nicht noch einmal hochgeladen.
+
 ## QNAP (Dashboard auf dem NAS installieren oder neu bauen)
 
 Reiter „QNAP“: Das Werkzeug begleitet die SSH-Schritte für das Dashboard auf einer QNAP –
