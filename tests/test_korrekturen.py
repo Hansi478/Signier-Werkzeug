@@ -358,7 +358,7 @@ class QnapZweiteRunde(test_qnap.Ablauf):
         self.schritt("verbindung", root="ja")
         self.b.rueckmelden("alt_loeschen", "uebersprungen", {})
         v = self.b.vorbereiten("zip_loeschen")
-        self.assertEqual(v["befehl"], f"cd '/share/BEISPIEL' && rm -- '{zn}'; ls -la")
+        self.assertEqual(v["befehl"], f"cd '/share/BEISPIEL' && if [ -e '{zn}' ]; then rm -- '{zn}'; fi; ls -la")
         self.b.ausfuehren("zip_loeschen", v["marke"], {"bestaetigt": True})
         self.b.rueckmelden("zip_loeschen", "geklappt", {})
         self.assertEqual(self.b.ansicht()["zips"], [])
@@ -369,11 +369,20 @@ class QnapZweiteRunde(test_qnap.Ablauf):
         self.bis_hochladen()
         self.schritt("hochladen")
         self.b.abbrechen()
-        for aenderung in ({"host": "198.51.100.7"}, {"programmordner": "/share/ANDERS/programmordner"}):
-            with self.subTest(aenderung=aenderung):
-                self.assertRaisesRegex(ValueError, "bleiben fest", self.b.profil_speichern,
-                                       {**test_qnap.PROFIL, **aenderung}, ("quelle01",))
+        self.assertRaisesRegex(ValueError, "bleibt fest", self.b.profil_speichern,
+                               {**test_qnap.PROFIL, "programmordner": "/share/ANDERS/programmordner"}, ("quelle01",))
+        self.assertRaisesRegex(ValueError, "dasselbe Gerät", self.b.profil_speichern,
+                               {**test_qnap.PROFIL, "host": "198.51.100.7"}, ("quelle01",))
         self.b.profil_speichern({**test_qnap.PROFIL, "benutzer": "anderer-benutzer"}, ("quelle01",))   # erlaubt
+        # neue Adresse desselben Geräts (z. B. DHCP): nach Bestätigung erlaubt, protokolliert
+        self.b.profil_speichern({**test_qnap.PROFIL, "host": "198.51.100.7", "gleiches_geraet": True}, ("quelle01",))
+        self.assertEqual(self.b.ansicht()["profil"]["host"], "198.51.100.7")
+        self.assertIn("gleiches Gerät bestätigt", self.protokoll())
+        # gemerkte ZIP vergessen: danach ist der Ordner frei
+        self.assertTrue(self.b.ansicht()["zips"])
+        self.b.zips_vergessen()
+        self.assertEqual(self.b.ansicht()["zips"], [])
+        self.b.profil_speichern({**test_qnap.PROFIL, "programmordner": "/share/ANDERS/programmordner"}, ("quelle01",))
 
     def test_ueberspringen_nach_ausfuehren_abgelehnt(self):
         """N9"""

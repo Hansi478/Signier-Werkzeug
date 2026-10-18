@@ -1843,7 +1843,23 @@ def _zip_gueltig(daten):
             raise ValueError("Die gebaute ZIP ist beschädigt.")
 
 
-def qnap_paket(pr, token, tag, name, ziel):
+def _alte_pakete_entfernen(ziel, name, behalten, alter=12 * 3600):
+    """Lokale ZIPs früherer Downloads (je Download ein eigener Name) aufräumen."""
+    try:
+        namen = os.listdir(ziel)
+    except OSError:
+        return
+    for n in namen:
+        if n != behalten and (n == name + ".zip" or re.fullmatch(re.escape(name) + r"-[0-9a-f]{8}\.zip", n)):
+            pfad = os.path.join(ziel, n)
+            try:
+                if time.time() - os.lstat(pfad).st_mtime > alter:
+                    os.remove(pfad)
+            except OSError:
+                pass
+
+
+def qnap_paket(pr, token, tag, name, ziel, datei=None):
     """Signierte Version (Tag) laden, prüfen und als saubere ZIP mit genau
     einem Ordner `name` in `ziel` ablegen -> Angaben für die Anzeige.
     ValueError, wenn Signatur, Dateien oder Version nicht passen."""
@@ -1916,9 +1932,13 @@ def qnap_paket(pr, token, tag, name, ziel):
                 info.compress_type = zipfile.ZIP_DEFLATED
                 zo.writestr(info, regulaer_lesen(os.path.join(ordner, *rel.split("/"))))
         daten = puffer.getvalue()
-    atomar_schreiben(ziel, name + ".zip", daten, 0o600, _zip_gueltig)
+    # eigener Dateiname je Download: ein später fertig werdender, abgebrochener Download
+    # überschreibt nicht die ZIP des laufenden Ablaufs
+    datei = datei or f"{name}-{secrets.token_hex(4)}.zip"
+    atomar_schreiben(ziel, datei, daten, 0o600, _zip_gueltig)
+    _alte_pakete_entfernen(ziel, name, datei)
     unsigniert = [rel for rel in alle if rel not in dateien]   # nicht übernommen
-    return {"tag": tag, "version": version, "commit": commit, "zip": os.path.join(ziel, name + ".zip"),
+    return {"tag": tag, "version": version, "commit": commit, "zip": os.path.join(ziel, datei),
             "sha256": hashlib.sha256(daten).hexdigest(), "dateien": len(dateien), "signiert": len(signiert),
             "bau_signiert": len(bau_signiert), "bau_stufe": bau["stufe"], "bau_text": bau.get("text", ""),
             "unsigniert": unsigniert[:200], "unsigniert_anzahl": len(unsigniert)}
@@ -1947,6 +1967,8 @@ def qnap_aktion(name, p):
         antwort = b.abbrechen()
     elif name == "qnap_alt_vergessen":
         antwort = b.alt_vergessen()
+    elif name == "qnap_zips_vergessen":
+        antwort = b.zips_vergessen()
     elif name == "qnap_sperre_aufheben":
         antwort = b.sperre_aufheben()
     elif name == "qnap_vorbereiten":
@@ -1963,7 +1985,7 @@ def qnap_aktion(name, p):
         return Q.http_pruefen(pr.get("adresse"))
     else:
         raise ValueError("Unbekannte Aktion.")
-    if name in ("qnap_profil_speichern", "qnap_abbrechen", "qnap_alt_vergessen", "qnap_sperre_aufheben") \
+    if name in ("qnap_profil_speichern", "qnap_abbrechen", "qnap_alt_vergessen", "qnap_zips_vergessen", "qnap_sperre_aufheben") \
             and not antwort.get("lauf") and p.get("ablauf"):
         antwort = b.ansicht(p.get("ablauf"))   # die gewählte Ablaufart bleibt angezeigt
     return {**antwort, "quellen": liste}
@@ -2577,6 +2599,7 @@ Version __VERSION__ <button class="zweit" id="beenden">Beenden</button></div></h
   <div class="zeile" style="margin-top:10px"><button class="zweit" id="q-http">Dashboard-Adresse prüfen</button>
    <button class="zweit" id="q-protokoll">Ordner mit Protokoll öffnen</button>
    <button class="zweit versteckt" id="q-vergessen">Gemerkten alten Ordner vergessen</button>
+   <button class="zweit versteckt" id="q-zips-vergessen">Gemerkte ZIPs vergessen</button>
    <button class="zweit versteckt" id="q-sperre">Bau-Sperre aufheben</button></div>
   <div class="hinweis" id="q-info" style="margin-top:8px"></div>
   <div class="status" id="q-status"></div></div>
@@ -2877,6 +2900,7 @@ function qZeichnen() {
   ["q-host", "q-port", "q-benutzer", "q-ordner", "q-adresse", "q-bin", "q-compose", "q-quelle", "q-speichern"].forEach(id => $(id).disabled = laeuft);
   $("q-beginnen").disabled = laeuft || !QZ.profil; $("q-abbrechen").disabled = !laeuft;
   $("q-vergessen").classList.toggle("versteckt", !QZ.alt || laeuft);
+  $("q-zips-vergessen").classList.toggle("versteckt", !(QZ.zips && QZ.zips.length) || laeuft);
   $("q-sperre").classList.toggle("versteckt", !QZ.bau_gesperrt || laeuft);
   $("q-info").innerHTML = (QZ.alt ? `Beiseitegelegter alter Ordner: <span class="mono">${esc(QZ.alt)}</span> (Rückweg möglich). ` : "")
     + (QZ.zips && QZ.zips.length ? `Hochgeladene ZIP: <span class="mono">${QZ.zips.map(esc).join(", ")}</span> (löscht „Aufräumen“). ` : "")
@@ -2989,7 +3013,10 @@ async function qLaden() {
 $("q-ablauf").onchange = qLaden;
 $("q-nur").onchange = qZeichnen;
 $("q-speichern").onclick = e => mit("q-pstatus", e.target, "Speichere …", async () => {
-  qSetzen(await api("qnap_profil_speichern", {host: $("q-host").value, port: $("q-port").value, benutzer: $("q-benutzer").value,
+  const gemerkt = QZ.alt || (QZ.zips && QZ.zips.length), alterHost = (QZ.profil || {}).host || "";
+  const gleich = !!(gemerkt && alterHost && $("q-host").value.trim() !== alterHost
+    && confirm(`Die Adresse ändern (${alterHost} → ${$("q-host").value.trim()})? Es ist noch ein beiseitegelegter Ordner bzw. eine hochgeladene ZIP gemerkt – nur bestätigen, wenn es DIESELBE QNAP unter neuer Adresse ist.`));
+  qSetzen(await api("qnap_profil_speichern", {gleiches_geraet: gleich, host: $("q-host").value, port: $("q-port").value, benutzer: $("q-benutzer").value,
     programmordner: $("q-ordner").value, adresse: $("q-adresse").value, quelle: $("q-quelle").value, compose: $("q-compose").value,
     bin_ordner: $("q-bin").value, ablauf: $("q-ablauf").value}));
   qProfilZeigen(); status("q-pstatus", "ok", "✅ Gespeichert."); });
@@ -3009,6 +3036,11 @@ $("q-sperre").onclick = e => {
 $("q-vergessen").onclick = e => {
   if (!confirm(`Den gemerkten Ordner „${QZ.alt}“ vergessen? Nur, wenn es ihn auf der QNAP sicher nicht (mehr) gibt – sonst geht der Rückweg verloren.`)) return;
   mit("q-status", e.target, "…", async () => { qSetzen(await api("qnap_alt_vergessen", {ablauf: $("q-ablauf").value})); status("q-status", "ok", "Vergessen."); })
+    .then(qZeichnen);
+};
+$("q-zips-vergessen").onclick = e => {
+  if (!confirm(`Die gemerkten ZIPs (${(QZ.zips || []).join(", ")}) vergessen? Nur, wenn es sie auf der QNAP nicht (mehr) gibt oder du sie selbst löschst.`)) return;
+  mit("q-status", e.target, "…", async () => { qSetzen(await api("qnap_zips_vergessen", {ablauf: $("q-ablauf").value})); status("q-status", "ok", "Vergessen."); })
     .then(qZeichnen);
 };
 $("q-http").onclick = e => mit("q-status", e.target, "Rufe die Dashboard-Adresse auf …", async () => {

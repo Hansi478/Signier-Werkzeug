@@ -136,9 +136,15 @@ class BefehlTests(unittest.TestCase):
                             "&& ls -la; else echo 'ABBRUCH: programmordner fehlt - nichts veraendert'; fi")
         self.assertRaises(ValueError, self.befehl, "entpacken", pr)   # ohne geprüfte ZIP
         self.assertRaises(ValueError, self.befehl, "entpacken", pr, {"paket": {"sha256": "a" * 64, "zipname": "programmordner.zip"}})
-        b = self.befehl("entpacken", pr, {"paket": {"sha256": "a" * 64, "zipname": "programmordner.signier-20260101-1200.zip"}})
+        paket = {"sha256": "a" * 64, "zipname": "programmordner.signier-20260101-1200.zip"}
+        self.assertRaises(ValueError, self.befehl, "entpacken", pr, {"paket": paket})   # ohne geplanten Zwischenordner
+        b = self.befehl("entpacken", pr, {"paket": paket, "geplant_entpacken": "programmordner.entpacken-20260101-120000"})
         self.assertIn("echo '" + "a" * 64 + "  programmordner.signier-20260101-1200.zip' | sha256sum -c - && ", b)
-        self.assertIn("unzip -q 'programmordner.signier-20260101-1200.zip'", b)
+        # erst in den Zwischenordner, dann umbenennen - nie ein halber Programmordner
+        self.assertIn("mkdir -- 'programmordner.entpacken-20260101-120000' && unzip -q -d "
+                      "'programmordner.entpacken-20260101-120000' 'programmordner.signier-20260101-1200.zip' && mv -- "
+                      "'programmordner.entpacken-20260101-120000/programmordner' 'programmordner' && rmdir -- "
+                      "'programmordner.entpacken-20260101-120000' && ls -la 'programmordner'", b)
         self.assertNotIn("sudo unzip", b)
 
     def test_aufraeumen_nur_erlaubte_ziele(self):
@@ -147,9 +153,10 @@ class BefehlTests(unittest.TestCase):
         pr = profil(root_wert=False)
         z = {"alt": "programmordner.alt-20260101-1200", "zips": ["programmordner.signier-20260101-1200.zip"]}
         lauf = {"paket": {"sha256": "b" * 64, "zipname": "programmordner.signier-20260101-1200.zip"}, "geplant_alt": "programmordner.alt-20260101-1300",
-                "geplant_kaputt": "programmordner.kaputt-20260101-1300"}
+                "geplant_kaputt": "programmordner.kaputt-20260101-1300", "geplant_entpacken": "programmordner.entpacken-20260101-130000"}
         erlaubt = {"'/share/BEISPIEL'", "'/share/BEISPIEL/programmordner'", "'programmordner'", "'programmordner.signier-20260101-1200.zip'",
                    "'programmordner.alt-20260101-1200'", "'programmordner.alt-20260101-1300'",
+                   "'programmordner.entpacken-20260101-130000'", "'programmordner.entpacken-20260101-130000/programmordner'",
                    "'programmordner.kaputt-20260101-1300'", "'--bau-pruefen'", "'/share/BEISPIEL/programmordner/app.py'"}
         import re
         for sid, s in Q.SCHRITTE.items():
@@ -330,7 +337,7 @@ class ReihenfolgeTests(Ablauf):
         oeffentlich = [n for n in dir(self.b) if not n.startswith("_")]
         self.assertEqual(sorted(oeffentlich), sorted(["abbrechen", "alt_vergessen", "ansicht", "ausfuehren", "beginnen", "jetzt",
                                                "lock", "ordner", "profil_speichern", "prog", "protokollieren",
-                                               "rueckmelden", "sperre_aufheben", "starter", "vorbereiten"]))
+                                               "rueckmelden", "sperre_aufheben", "starter", "vorbereiten", "zips_vergessen"]))
 
 
 class InstallierenTests(Ablauf):
@@ -430,6 +437,60 @@ class InstallierenTests(Ablauf):
         self.schritt("bau_pruefen_run", bauergebnis="0")
         self.schritt("bauen")
         self.b.vorbereiten("starten")
+
+    def bis_bauen(self, pruef_fehler=None):
+        self.bis_beiseite()
+        v = self.b.vorbereiten("beiseite")
+        self.b.ausfuehren("beiseite", v["marke"], {"bestaetigt": True, "name": "programmordner"})
+        self.b.rueckmelden("beiseite", "geklappt", {})
+        self.schritt("entpacken")
+        self.schritt("bau_vorpruefung", treffer="mehr")
+        if pruef_fehler is not None:
+            self.schritt("bau_pruefen_run", "fehler", **({"bauergebnis": pruef_fehler} if pruef_fehler else {}))
+            return
+        self.schritt("bau_pruefen_run", bauergebnis="0")
+
+    def zurueck_bis_bauen(self):
+        self.b.abbrechen()
+        self.b.beginnen("zurueck")
+        self.schritt("verbindung", root="ja")
+        self.b.rueckmelden("anhalten", "uebersprungen", {})
+        self.schritt("wegstellen", name="programmordner")
+        self.schritt("zurueckholen", name=self.b.ansicht()["alt"])
+        self.schritt("bau_vorpruefung", treffer="mehr")
+        self.schritt("bau_pruefen_run", bauergebnis="0")
+        return next(x for x in self.b.ansicht()["schritte"] if x["id"] == "bauen")
+
+    def test_rueckweg_ohne_neubau_wenn_nicht_gebaut(self):
+        """M6: Bauen scheiterte (z. B. ohne Internet) - das alte Image ist unversehrt."""
+        self.bis_bauen()
+        self.schritt("bauen", "fehler")
+        bauen = self.zurueck_bis_bauen()
+        self.assertTrue(bauen["optional"])
+        self.b.rueckmelden("bauen", "uebersprungen", {})
+        self.b.vorbereiten("starten")
+
+    def test_rueckweg_baut_neu_wenn_gebaut(self):
+        self.bis_bauen()
+        self.schritt("bauen")
+        self.schritt("starten", "fehler")
+        bauen = self.zurueck_bis_bauen()
+        self.assertFalse(bauen["optional"])
+        self.assertRaises(ValueError, self.b.rueckmelden, "bauen", "uebersprungen", {})
+
+    def test_fehler_ohne_pruefung_sperrt_nicht_dauerhaft(self):
+        """M7: „Fehler“ ohne Ergebnis 2 (Prüfung lief nicht) sperrt nur den Lauf."""
+        self.bis_bauen(pruef_fehler="")
+        self.assertRaises(ValueError, self.b.vorbereiten, "bauen")   # der Lauf bleibt bei der Prüfung stehen
+        self.assertFalse(self.b.ansicht()["bau_gesperrt"])
+        self.zurueck_bis_bauen()   # alte Version: Prüfung 0 wird angenommen
+
+    def test_ergebnis_2_sperrt_bis_anderer_stand(self):
+        self.bis_bauen(pruef_fehler="2")
+        self.assertTrue(self.b.ansicht()["bau_gesperrt"])
+        self.zurueck_bis_bauen()   # zurückgeholter alter Ordner: Sperre galt den neuen Dateien
+        self.assertFalse(self.b.ansicht()["bau_gesperrt"])
+        self.assertIn("Bau-Sperre aufgehoben", self.protokoll())
 
     def test_zurueck_ohne_alt_ordner(self):
         self.assertRaises(ValueError, self.b.beginnen, "zurueck")
@@ -715,7 +776,11 @@ class PaketTests(unittest.TestCase):
         self.assertNotIn("programmordner/Dockerfile", namen)   # unsigniert: nicht in die ZIP
         self.assertNotIn("programmordner/tools/start.sh", namen)
         self.assertEqual(modi["programmordner/app.py"], 0o644)
-        self.assertEqual(os.listdir(os.path.join(self.tmp, "ziel")), ["programmordner.zip"])   # nichts liegen geblieben
+        self.assertEqual(os.listdir(os.path.join(self.tmp, "ziel")), [os.path.basename(r["zip"])])   # nichts liegen geblieben
+        self.assertRegex(os.path.basename(r["zip"]), r"^programmordner-[0-9a-f]{8}\.zip$")   # eigener Name je Download
+        r2 = self.laden(self.zipball())
+        self.assertNotEqual(r2["zip"], r["zip"])
+        self.assertTrue(os.path.exists(r["zip"]))   # frische ZIP eines anderen Downloads bleibt
 
     def test_fremde_datei_kommt_nicht_in_die_zip(self):
         # ausgenommen (bei Speedrace: außerhalb der Update-Dateien) - früher trotzdem in der ZIP
@@ -734,7 +799,7 @@ class PaketTests(unittest.TestCase):
 
     def test_veraendert_abgelehnt(self):
         self.assertRaises(ValueError, self.laden, self.zipball(aendern={"app.py": b"print(2)\n"}))
-        self.assertFalse(os.path.exists(os.path.join(self.tmp, "ziel", "programmordner.zip")))
+        self.assertEqual(os.listdir(os.path.join(self.tmp, "ziel")) if os.path.isdir(os.path.join(self.tmp, "ziel")) else [], [])
 
     def test_version_muss_zum_tag_passen(self):
         self.assertRaises(ValueError, self.laden, self.zipball(), "v1.8.6")

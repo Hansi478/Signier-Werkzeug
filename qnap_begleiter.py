@@ -101,7 +101,8 @@ def pfad_pruefen(wert, was="Pfad", mindestens=1):
 def programmordner_pruefen(wert):
     p = pfad_pruefen(wert, "Programmordner", 2)
     name = posixpath.basename(p)
-    if name.casefold() in GESPERRTE_NAMEN or name.startswith(".") or re.search(_ALT_RE + "$", name):
+    if name.casefold() in GESPERRTE_NAMEN or name.startswith(".") or re.search(_ALT_RE + "$", name) \
+            or re.search(r"\.(kaputt|entpacken)-\d{8}-\d{4,6}$", name):
         raise ValueError(f"„{name}“ kann nicht der Programmordner sein.")
     return p
 
@@ -251,9 +252,16 @@ def _b_entpacken(pr, lauf, z, roh):
         if not _SHA_RE.match(summe):
             raise ValueError("Erst Schritt „Version laden“ abschließen.")
         _zip_pruefen(o, zipname)
+    # erst in einen eigenen Zwischenordner, dann umbenennen: bricht unzip ab (z. B. Platte
+    # voll), entsteht kein halber Programmordner, aus dem weitergebaut würde
+    tmp = lauf.get("geplant_entpacken") or (o["name"] + ".entpacken-JJJJMMTT-hhmmss" if roh else "")
+    if not roh and not re.fullmatch(re.escape(o["name"]) + r"\.entpacken-\d{8}-\d{6}", tmp):
+        raise ValueError("Schritt neu vorbereiten.")
     return (f"cd {q(o['e'])} && echo {q(summe + '  ' + zipname)} | sha256sum -c - && "
             f"if [ -e {q(o['name'])} ]; then {_abbruch(o['name'] + ' gibt es noch - nichts entpackt')}; "
-            f"else unzip -q {q(zipname)} && ls -la {q(o['name'])}; fi")
+            f"elif [ -e {q(tmp)} ]; then {_abbruch(tmp + ' gibt es schon - Schritt neu vorbereiten')}; "
+            f"else mkdir -- {q(tmp)} && unzip -q -d {q(tmp)} {q(zipname)} && mv -- {q(tmp + '/' + o['name'])} "
+            f"{q(o['name'])} && rmdir -- {q(tmp)} && ls -la {q(o['name'])}; fi")
 
 
 def _b_bau_vorpruefung(pr, lauf, z, roh):
@@ -315,7 +323,8 @@ def _b_zip_loeschen(pr, lauf, z, roh):
         raise ValueError("Es ist keine vom Werkzeug hochgeladene ZIP bekannt - Schritt überspringen.")
     for n in zips if not roh else []:
         _zip_pruefen(o, n)
-    return f"cd {q(o['e'])} && rm -- {' '.join(q(n) for n in zips)}; ls -la"
+    # je Datei nur, wenn es sie gibt (scp kann gescheitert sein, bevor sie entstand)
+    return f"cd {q(o['e'])} && " + "".join(f"if [ -e {q(n)} ]; then rm -- {q(n)}; fi; " for n in zips) + "ls -la"
 
 
 def _b_images(pr, lauf, z, roh):
@@ -373,6 +382,8 @@ SCHRITTE = {
         "titel": "Vorbereitung prüfen", "art": "anleitung",
         "erklaerung": [
             "In QTS SSH einschalten: Systemsteuerung → Netzwerk- & Dateidienste → Telnet/SSH → „SSH-Verbindung zulassen“ (Port merken).",
+            "Unter Windows 11 kopiert scp über SFTP: in QTS zusätzlich „SFTP aktivieren“ einschalten (gleiche Seite bzw. "
+            "Win/Mac/NFS/WebDAV → SFTP), sonst meldet das Hochladen „subsystem request failed“.",
             "Mit einem Admin-Benutzer anmelden (Gruppe „administrators“). Das Passwort tippst du später selbst im Konsolenfenster - das Werkzeug sieht es nicht.",
             "Beim ersten Verbinden fragt ssh: „The authenticity of host … can't be established … fingerprint is SHA256:…“. Das ist der "
             "Fingerabdruck des Host-Schlüssels der QNAP: Mit „yes“ merkt sich Windows ihn (in %USERPROFILE%\\.ssh\\known_hosts) und "
@@ -420,6 +431,8 @@ SCHRITTE = {
                        "Das Passwort tippst du im Fenster."],
         "erwartet": "Eine Fortschrittszeile mit 100 %.",
         "fehler": [("Permission denied (beim Kopieren)", "Der Benutzer darf im Elternordner nicht schreiben."),
+                   ("subsystem request failed / Connection closed", "scp nutzt unter Windows 11 SFTP: in QTS „SFTP "
+                    "aktivieren“ einschalten und den Schritt wiederholen."),
                    ("No such file or directory", "Elternordner falsch - Programmordner im Profil prüfen.")] + _SSH_FEHLER,
     },
     "ordner": {
@@ -457,13 +470,17 @@ SCHRITTE = {
     },
     "entpacken": {
         "titel": "Neue Version entpacken", "art": "ssh", "befehl": _b_entpacken,
-        "erklaerung": ["Prüft zuerst die Prüfsumme der hochgeladenen ZIP, dann entpackt unzip sie im Elternordner. "
+        "erklaerung": ["Prüft zuerst die Prüfsumme der hochgeladenen ZIP, dann entpackt unzip sie in einen eigenen "
+                       "Zwischenordner (…entpacken-…) im Elternordner und benennt erst danach den fertigen Ordner um. "
                        "Dabei entsteht genau der Programmordner neu - sonst nichts."],
         "erwartet": "„… OK“ von sha256sum, danach die Liste des neuen Programmordners.",
         "fehler": [("FAILED / sha256sum: WARNING", "Die ZIP auf der QNAP ist nicht die geprüfte. Nicht weitermachen - "
                     "Schritt „Hochladen“ wiederholen."),
                    ("ABBRUCH: … gibt es noch", "Der alte Programmordner ist nicht beiseitegelegt."),
-                   ("unzip: not found", "unzip fehlt - „Zur vorigen Version zurück“ verwenden.")],
+                   ("unzip: not found", "unzip fehlt - „Zur vorigen Version zurück“ verwenden."),
+                   ("unzip: … write error / No space left", "Entpacken abgebrochen (z. B. Speicher voll): Der Programmordner "
+                    "ist nicht entstanden, nur ein halber Zwischenordner …entpacken-… (wird nicht benutzt, kann von Hand "
+                    "gelöscht werden). Platz schaffen und den Schritt wiederholen - oder „Zur vorigen Version zurück“.")],
     },
     "bau_vorpruefung": {
         "titel": "Kennt das Programm die Bau-Prüfung?", "art": "ssh", "befehl": _b_bau_vorpruefung,
@@ -595,6 +612,13 @@ ABLAEUFE = {
     "aufraeumen": {"titel": "Aufräumen (alter Ordner, ZIP, Images)",
                    "schritte": ["verbindung", "alt_loeschen", "zip_loeschen", "images"]},
 }
+
+
+def _optional(s, ablauf, z):
+    """Im Rückweg darf „Image neu bauen“ entfallen, wenn die Installation kein
+    neues Image gebaut hat (z. B. Bauen ohne Internet gescheitert) - dann passt
+    das vorhandene Image noch zur alten Version."""
+    return bool(s.get("optional")) or (s["id"] == "bauen" and ablauf == "zurueck" and not z.get("neu_gebaut"))
 
 
 def _schritte(ablauf):
@@ -765,8 +789,13 @@ class Begleiter:
                     befehl = (f"scp -P {pr.get('port')} -- <geprüfte ZIP> "
                               f"{pr.get('benutzer')}@{ziel_host(pr)}:{orte(pr)['e']}/{zn}")
                 status = ((lauf or {}).get("status") or {}).get(str(i), "offen") if lauf else "offen"
-                schritte.append({k: s.get(k) for k in ("id", "titel", "art", "optional", "erklaerung", "erwartet",
+                schritte.append({k: s.get(k) for k in ("id", "titel", "art", "erklaerung", "erwartet",
                                                        "bestaetigung", "rueckfrage")}
+                                | {"optional": _optional(s, ablauf, z)}
+                                | ({"erklaerung": s["erklaerung"] + [
+                                    "Die Installation hat kein neues Image gebaut: Das vorhandene passt noch zur alten "
+                                    "Version - Überspringen ist möglich (z. B. ohne Internet)."]}
+                                   if s["id"] == "bauen" and ablauf == "zurueck" and not z.get("neu_gebaut") else {})
                                 | {"fehler": [list(f) for f in s["fehler"]], "befehl": befehl, "status": status,
                                    "nr": i})
             o = orte(pr) if pr else {}
@@ -784,11 +813,17 @@ class Begleiter:
                 raise ValueError("Während ein Ablauf läuft, bleibt das Profil fest - erst abschließen oder abbrechen.")
             neu = profil_pruefen(p, quellen)
             alt = z.get("profil") or {}
-            if (z.get("alt") or z.get("zips")) and alt and (alt.get("host") != neu["host"]
-                                                            or alt.get("programmordner") != neu["programmordner"]):
-                raise ValueError("Host und Programmordner bleiben fest, solange ein beiseitegelegter Ordner oder eine "
-                                 "hochgeladene ZIP gemerkt ist (sie gehören zu diesem Gerät und Ordner). Erst "
-                                 "„Zur vorigen Version zurück“ bzw. „Aufräumen“ - oder den gemerkten Ordner vergessen.")
+            if (z.get("alt") or z.get("zips")) and alt and alt.get("programmordner") != neu["programmordner"]:
+                raise ValueError("Der Programmordner bleibt fest, solange ein beiseitegelegter Ordner oder eine "
+                                 "hochgeladene ZIP gemerkt ist (sie gehören zu diesem Ordner). Erst „Zur vorigen Version "
+                                 "zurück“ bzw. „Aufräumen“ - oder das Gemerkte vergessen.")
+            if (z.get("alt") or z.get("zips")) and alt and alt.get("host") != neu["host"]:
+                if p.get("gleiches_geraet") is not True:
+                    raise ValueError("Die Adresse der QNAP ändern, obwohl noch ein beiseitegelegter Ordner bzw. eine "
+                                     "hochgeladene ZIP gemerkt ist? Das geht nur, wenn es dasselbe Gerät unter neuer "
+                                     "Adresse ist (bitte bestätigen).")
+                self.protokollieren("-", "-", "Adresse geändert (gleiches Gerät bestätigt)",
+                                    f"{alt.get('host')} -> {neu['host']}")
             z["profil"] = neu
             self._speichern(z)
             return self.ansicht()
@@ -827,6 +862,18 @@ class Begleiter:
             self._speichern(z)
             if alt:
                 self.protokollieren("-", "-", "gemerkten alten Ordner vergessen", alt)
+            return self.ansicht()
+
+    def zips_vergessen(self):
+        """Gemerkte hochgeladene ZIPs vergessen (z. B. schon von Hand gelöscht)."""
+        with self.lock:
+            z = self._zustand()
+            if z.get("lauf"):
+                raise ValueError("Erst den laufenden Ablauf abschließen oder abbrechen.")
+            zips = z.pop("zips", None)
+            self._speichern(z)
+            if zips:
+                self.protokollieren("-", "-", "gemerkte ZIPs vergessen", ", ".join(zips))
             return self.ansicht()
 
     def sperre_aufheben(self):
@@ -877,6 +924,8 @@ class Begleiter:
             # einmal festgelegt, bleibt der Name im Lauf gleich - sonst überschriebe
             # eine Wiederholung den Namen des wirklich umbenannten Ordners
             lauf["geplant_alt"] = lauf.get("beiseite_gestartet") or alt_name(o["name"], self.jetzt())
+        if s["id"] == "entpacken":
+            lauf["geplant_entpacken"] = o["name"] + ".entpacken-" + time.strftime("%Y%m%d-%H%M%S", time.localtime(self.jetzt()))
         if s["id"] == "wegstellen":
             lauf["geplant_kaputt"] = o["name"] + ".kaputt-" + time.strftime("%Y%m%d-%H%M", time.localtime(self.jetzt()))
         if s["art"] in ("ssh", "scp") and os.name == "nt" and self.prog is None:
@@ -997,7 +1046,7 @@ class Begleiter:
             lauf, s, i = self._aktuell(z, schritt_id)
             status = lauf["status"].get(str(i), "offen")
             if ergebnis == "uebersprungen":
-                if not s["optional"]:
+                if not _optional(s, lauf["ablauf"], z):
                     raise ValueError("Dieser Schritt ist nicht optional.")
                 if status in ("laeuft", "laedt"):
                     raise ValueError("Der Schritt wurde schon ausgeführt - bitte das Ergebnis melden (geklappt/Fehler).")
@@ -1045,16 +1094,32 @@ class Begleiter:
                 if s["id"] in ("alt_loeschen", "zurueckholen"):
                     z["alt"] = ""
                     lauf.pop("beiseite_gestartet", None)   # sonst böte „Abbrechen“ den gelöschten Ordner als Rückweg an
+                if s["id"] in ("entpacken", "wegstellen", "zurueckholen") and (z.get("bau_gesperrt") or lauf.get("bau_gesperrt")):
+                    # andere Dateien im Programmordner: die Sperre galt den vorigen
+                    z.pop("bau_gesperrt", None)
+                    lauf["bau_gesperrt"] = False
+                    notiz = "Bau-Sperre aufgehoben (anderer Stand im Programmordner)"
+                if s["id"] == "beiseite":
+                    z.pop("neu_gebaut", None)   # das vorhandene Image gehört zum beiseitegelegten Ordner
+                if s["id"] == "bauen":
+                    if lauf["ablauf"] == "zurueck":
+                        z.pop("neu_gebaut", None)
+                    else:
+                        z["neu_gebaut"] = True   # der Rückweg muss das Image dann neu bauen
                 if s["id"] == "zip_loeschen":
                     z.pop("zips", None)
             elif s["id"] == "beiseite" and lauf.get("beiseite_gestartet"):
                 # unklar, ob umbenannt wurde: den Namen für den Rückweg merken
                 z["alt"] = lauf["beiseite_gestartet"]
             if ergebnis == "fehler" and s["rueckfrage"] == "bauergebnis":
-                lauf["bau_gesperrt"] = True   # gilt, bis eine Wiederholung 0 bzw. bestätigt 1 ergibt
-                z["bau_gesperrt"] = True      # auch nach Abbrechen und Neubeginn
+                lauf["bau_gesperrt"] = True   # dieser Lauf: gilt, bis eine Wiederholung 0 bzw. bestätigt 1 ergibt
                 if str(p.get("bauergebnis") or "") == "2":
+                    # nur ein echtes Ergebnis 2 sperrt über den Lauf hinaus - für genau diese Dateien
+                    # (aufgehoben, sobald ein anderer Stand in den Programmordner kommt)
+                    z["bau_gesperrt"] = True
                     notiz = "Ergebnis=2 - Neubau gesperrt"
+                else:
+                    notiz = "keine Prüfung gelaufen"
             lauf["status"][str(i)] = {"geklappt": "erledigt", "fehler": "fehler", "uebersprungen": "uebersprungen"}[ergebnis]
             lauf["ausgefuehrt"] = None
             if ergebnis != "fehler":
