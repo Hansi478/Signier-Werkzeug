@@ -1963,6 +1963,9 @@ def qnap_aktion(name, p):
         return Q.http_pruefen(pr.get("adresse"))
     else:
         raise ValueError("Unbekannte Aktion.")
+    if name in ("qnap_profil_speichern", "qnap_abbrechen", "qnap_alt_vergessen", "qnap_sperre_aufheben") \
+            and not antwort.get("lauf") and p.get("ablauf"):
+        antwort = b.ansicht(p.get("ablauf"))   # die gewählte Ablaufart bleibt angezeigt
     return {**antwort, "quellen": liste}
 
 
@@ -2210,6 +2213,7 @@ class Server:
         self.token = secrets.token_urlsafe(24)
         self.letzter_kontakt = time.monotonic()
         self.aktiv = 0                      # laufende Aktionen (Beenden/Neustart warten darauf)
+        self.endet = False                  # „Beenden“ angenommen: keine neuen Aktionen
         self._aktiv_lock = threading.Lock()
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.port = self.httpd.server_address[1]
@@ -2260,9 +2264,12 @@ class Server:
                     if name == "ping":
                         return self._senden(200, "{}")
                     if name == "beenden":
-                        if server.aktiv:
-                            raise ValueError("Es läuft noch ein Vorgang (z. B. Signieren oder Hochladen). Bitte warten, "
-                                             "bis er fertig ist - sonst bliebe er halb erledigt.")
+                        with server._aktiv_lock:
+                            if server.aktiv:
+                                raise ValueError("Es läuft noch ein Vorgang (z. B. Signieren, Hochladen oder ein offenes "
+                                                 "Auswahlfenster). Bitte warten, bis er fertig ist - sonst bliebe er "
+                                                 "halb erledigt.")
+                            server.endet = True   # ab jetzt keine neuen Aktionen mehr annehmen
                         self._senden(200, "{}")
                         threading.Thread(target=server.httpd.shutdown, daemon=True).start()
                         return
@@ -2281,6 +2288,8 @@ class Server:
     @contextlib.contextmanager
     def _aktion_laeuft(self):
         with self._aktiv_lock:
+            if self.endet:
+                raise ValueError("Das Werkzeug wird gerade beendet.")
             self.aktiv += 1
         try:
             yield
@@ -2301,7 +2310,7 @@ class Server:
         self._warten_bis_frei()
         try:
             # eigenständig starten (nicht den entpackten Ordner dieses Prozesses mitbenutzen)
-            subprocess.Popen([sys.executable], close_fds=True, env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
+            subprocess.Popen([sys.executable], close_fds=True, env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1", "SIGNIER_NEUSTART": "1"},
                              creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
                              | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
         finally:
@@ -2704,15 +2713,22 @@ $("b-neu").onclick = e => mit("b-status", e.target, "Schlüssel wird erzeugt …
   $("b-kw1").value = $("b-kw2").value = ""; zeichnen(); schluesselTeil(Z.profile.find(x => x.id === $("b-id").value));
   status("b-status", "ok", "✅ " + esc(Z.meldung));
 });
-$("b-pfad-waehlen").onclick = async () => { try { const d = await api("datei_waehlen"); if (d.pfad) $("b-pfad").value = d.pfad; } catch (e) { alert(e.message); } };
+let waehlenOffen = false;   // nur ein Auswahlfenster zur Zeit (es kann lange offen sein)
+async function waehlen(aktion, ziel) {
+  if (waehlenOffen) return;
+  waehlenOffen = true;
+  document.querySelectorAll("[data-waehle], #b-pfad-waehlen").forEach(b => b.disabled = true);
+  try { const d = await api(aktion); if (d.pfad) $(ziel).value = d.pfad; } catch (e) { alert(e.message); }
+  finally { waehlenOffen = false; document.querySelectorAll("[data-waehle], #b-pfad-waehlen").forEach(b => b.disabled = false); }
+}
+$("b-pfad-waehlen").onclick = () => waehlen("datei_waehlen", "b-pfad");
 $("b-import").onclick = e => mit("b-status", e.target, "Schlüssel wird geprüft …", async () => {
   Z = await api("schluessel_import", {id: $("b-id").value, pfad: $("b-pfad").value, kennwort: $("b-pfad-kw").value});
   $("b-pfad-kw").value = ""; zeichnen(); schluesselTeil(Z.profile.find(x => x.id === $("b-id").value));
   status("b-status", "ok", "✅ " + esc(Z.meldung));
 });
 $("daten-oeffnen").onclick = () => api("ordner_oeffnen", {was: "daten"}).catch(e => alert(e.message));
-document.querySelectorAll("[data-waehle]").forEach(b => b.onclick = async () => {
-  try { const d = await api("ordner_waehlen"); if (d.pfad) $(b.dataset.waehle).value = d.pfad; } catch (e) { alert(e.message); } });
+document.querySelectorAll("[data-waehle]").forEach(b => b.onclick = () => waehlen("ordner_waehlen", b.dataset.waehle));
 function kennwort(text) {
   return new Promise(ok => {
     $("kw-text").textContent = text; $("kw-feld").value = ""; $("kw-dialog").classList.remove("versteckt"); $("kw-feld").focus();
@@ -2809,7 +2825,7 @@ async function bauAbfragen() {
   try { const d = await api("werkzeug_bau_status"); bauZeigen(d);
     const passt = !bauErwartet || d.tag === bauErwartet;
     if ((passt && ["fertig", "fehlgeschlagen"].includes(d.zustand)) || Date.now() > bauBis) { clearInterval(bauTimer); bauTimer = null; bauErwartet = ""; }
-  } catch (e) { status("w-status", "fehler", "❌ " + esc(e.message)); clearInterval(bauTimer); bauTimer = null; }
+  } catch (e) { status("w-status", "fehler", "❌ " + esc(e.message)); clearInterval(bauTimer); bauTimer = null; bauErwartet = ""; }
 }
 function bauBeobachten() { clearInterval(bauTimer); bauBis = Date.now() + 40 * 60 * 1000; bauTimer = setInterval(bauAbfragen, 20000); }
 $("w-bauen").onclick = e => {
@@ -2832,21 +2848,32 @@ $("w-veroeff").onclick = async e => {
 // ---- QNAP-Begleiter ----------------------------------------------------
 let QZ = null;
 const Q_STATUS = {offen: "offen", laeuft: "läuft – Ergebnis melden", laedt: "lädt und prüft …", erledigt: "erledigt", fehler: "Fehler", uebersprungen: "übersprungen"};
-function qSetzen(d) { QZ = d; qZeichnen(); }
-function qProfilZeigen() {
+function qSetzen(d) { QZ = d; qProfilAbgleichen(); qZeichnen(); }
+let qGezeigt = null;   // zuletzt ins Formular übernommener Serverstand je Feld
+function qProfilWerte() {
   const p = QZ.profil || {};
-  $("q-host").value = p.host || ""; $("q-port").value = p.port || 22; $("q-benutzer").value = p.benutzer || "";
-  $("q-ordner").value = p.programmordner || ""; $("q-adresse").value = p.adresse || ""; $("q-bin").value = p.bin_ordner || "";
-  $("q-compose").value = p.compose || "plugin";
+  return {"q-host": p.host || "", "q-port": String(p.port || 22), "q-benutzer": p.benutzer || "", "q-ordner": p.programmordner || "",
+    "q-adresse": p.adresse || "", "q-bin": p.bin_ordner || "", "q-compose": p.compose || "plugin", "q-quelle": p.quelle || ""};
+}
+function qProfilAbgleichen(erzwingen) {
+  // Felder, die der Benutzer nicht geändert hat, folgen dem Server (z. B. die im Ablauf erkannte
+  // Docker-Variante); geänderte Eingaben bleiben stehen. Die Liste der Quellen ist immer aktuell.
+  const neu = qProfilWerte(), alt = erzwingen ? null : qGezeigt;
+  const unveraendert = id => !alt || $(id).value === alt[id];
+  const quelle = unveraendert("q-quelle") ? neu["q-quelle"] : $("q-quelle").value;
   $("q-quelle").innerHTML = '<option value="">– bitte wählen –</option>' + (QZ.quellen || []).map(x =>
     `<option value="${esc(x.id)}">${esc(x.name)} (${esc(x.repo)})</option>`).join("");
-  $("q-quelle").value = p.quelle || "";
+  $("q-quelle").value = quelle;
+  for (const id of Object.keys(neu)) if (id !== "q-quelle" && unveraendert(id)) $(id).value = neu[id];
+  qGezeigt = neu;
 }
+function qProfilZeigen() { qProfilAbgleichen(true); }
 function qZeichnen() {
   if (!QZ) return;
   const laeuft = !!QZ.lauf, nur = $("q-nur").checked;
   if (!$("q-ablauf").options.length) $("q-ablauf").innerHTML = Object.entries(QZ.ablaeufe).map(([k, t]) => `<option value="${esc(k)}">${esc(t)}</option>`).join("");
-  $("q-ablauf").value = QZ.ablauf; $("q-ablauf").disabled = laeuft;
+  if (laeuft || !$("q-ablauf").value) $("q-ablauf").value = QZ.ablauf;   // sonst die eigene Auswahl behalten
+  $("q-ablauf").disabled = laeuft;
   ["q-host", "q-port", "q-benutzer", "q-ordner", "q-adresse", "q-bin", "q-compose", "q-quelle", "q-speichern"].forEach(id => $(id).disabled = laeuft);
   $("q-beginnen").disabled = laeuft || !QZ.profil; $("q-abbrechen").disabled = !laeuft;
   $("q-vergessen").classList.toggle("versteckt", !QZ.alt || laeuft);
@@ -2955,10 +2982,8 @@ function qMelden(s, ergebnis, knopf, mehr) {
     const n = $("qs-" + d.lauf.index); if (n) n.scrollIntoView({behavior: "smooth", block: "center"});
   });
 }
-let qFormGeladen = false;   // Eingaben im Profilformular nicht beim Reiter-/Ablaufwechsel überschreiben
 async function qLaden() {
-  try { const a = $("q-ablauf").value; qSetzen(await api("qnap_zustand", a ? {ablauf: a} : {}));
-    if (!qFormGeladen) { qProfilZeigen(); qFormGeladen = true; } }
+  try { const a = $("q-ablauf").value; qSetzen(await api("qnap_zustand", a ? {ablauf: a} : {})); }
   catch (e) { status("q-status", "fehler", "❌ " + esc(e.message)); }
 }
 $("q-ablauf").onchange = qLaden;
@@ -2966,24 +2991,24 @@ $("q-nur").onchange = qZeichnen;
 $("q-speichern").onclick = e => mit("q-pstatus", e.target, "Speichere …", async () => {
   qSetzen(await api("qnap_profil_speichern", {host: $("q-host").value, port: $("q-port").value, benutzer: $("q-benutzer").value,
     programmordner: $("q-ordner").value, adresse: $("q-adresse").value, quelle: $("q-quelle").value, compose: $("q-compose").value,
-    bin_ordner: $("q-bin").value}));
+    bin_ordner: $("q-bin").value, ablauf: $("q-ablauf").value}));
   qProfilZeigen(); status("q-pstatus", "ok", "✅ Gespeichert."); });
 $("q-beginnen").onclick = e => mit("q-status", e.target, "Beginne …", async () => {
   qSetzen(await api("qnap_beginnen", {ablauf: $("q-ablauf").value}));
   status("q-status", "ok", "✅ Ablauf begonnen – Schritt 1 ist freigegeben."); }).then(qZeichnen);
 $("q-abbrechen").onclick = e => {
   if (!confirm("Ablauf abbrechen? Bereits ausgeführte Schritte werden nicht rückgängig gemacht (ein beiseitegelegter Ordner bleibt gemerkt).")) return;
-  mit("q-status", e.target, "Breche ab …", async () => { qSetzen(await api("qnap_abbrechen")); status("q-status", "ok", "Abgebrochen."); })
+  mit("q-status", e.target, "Breche ab …", async () => { qSetzen(await api("qnap_abbrechen", {ablauf: $("q-ablauf").value})); status("q-status", "ok", "Abgebrochen."); })
     .then(qZeichnen);
 };
 $("q-sperre").onclick = e => {
   if (!confirm("Bau-Sperre aufheben? Nur, wenn die Bau-Dateien inzwischen aus der signierten Version neu geholt sind. Wird protokolliert.")) return;
-  mit("q-status", e.target, "…", async () => { qSetzen(await api("qnap_sperre_aufheben")); status("q-status", "ok", "Sperre aufgehoben."); })
+  mit("q-status", e.target, "…", async () => { qSetzen(await api("qnap_sperre_aufheben", {ablauf: $("q-ablauf").value})); status("q-status", "ok", "Sperre aufgehoben."); })
     .then(qZeichnen);
 };
 $("q-vergessen").onclick = e => {
   if (!confirm(`Den gemerkten Ordner „${QZ.alt}“ vergessen? Nur, wenn es ihn auf der QNAP sicher nicht (mehr) gibt – sonst geht der Rückweg verloren.`)) return;
-  mit("q-status", e.target, "…", async () => { qSetzen(await api("qnap_alt_vergessen")); status("q-status", "ok", "Vergessen."); })
+  mit("q-status", e.target, "…", async () => { qSetzen(await api("qnap_alt_vergessen", {ablauf: $("q-ablauf").value})); status("q-status", "ok", "Vergessen."); })
     .then(qZeichnen);
 };
 $("q-http").onclick = e => mit("q-status", e.target, "Rufe die Dashboard-Adresse auf …", async () => {
@@ -2999,7 +3024,7 @@ api("zustand").then(d => { Z = d; zeichnen(); if (!Z.profile.length) document.qu
 _INSTANZ = {}
 
 
-def _instanz_sperren(warten=10):
+def _instanz_sperren(warten=0):
     """Nur eine laufende Instanz je Windows-Benutzer: zwei Instanzen würden
     profile.json bzw. qnap.json gegenseitig überschreiben. -> True, wenn diese
     Instanz die Sperre hat. (Beim Neustart nach einem Update wartet die neue
@@ -3029,11 +3054,16 @@ def main():
         selbsttest(sys.argv[2])
         return
     adresse = os.path.join(daten_ordner(), "adresse.txt")
-    if not _instanz_sperren():
-        try:   # die laufende Instanz im Browser zeigen
+    # nur der Neustart nach einem Update wartet, bis die alte Instanz beendet ist
+    neustart = os.environ.pop("SIGNIER_NEUSTART", "") == "1"
+    if not _instanz_sperren(15 if neustart else 0):
+        try:   # die laufende Instanz zeigen
             url = regulaer_lesen(adresse, 4096).decode("ascii").strip()
             if re.fullmatch(r"http://127\.0\.0\.1:\d{1,5}/\?t=[A-Za-z0-9_-]{20,64}", url):
-                webbrowser.open(url)
+                if "--ohne-browser" in sys.argv:
+                    print("Das Werkzeug läuft schon:", url)
+                else:
+                    webbrowser.open(url)
         except (OSError, ValueError, UnicodeDecodeError):
             pass
         return

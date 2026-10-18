@@ -134,6 +134,40 @@ class LokalSignierenTests(Basis):
         self.assertNotIn("gesichert", self.signieren(pr)["meldung"])   # eigene Signatur: einfach ersetzt
 
 
+class OberflaecheTests(Basis):
+    """M4, N16-N19."""
+
+    def test_qnap_ablaufauswahl_bleibt(self):
+        d = W.aktion("qnap_abbrechen", {"ablauf": "aufraeumen"})
+        self.assertEqual(d["ablauf"], "aufraeumen")
+        self.assertEqual(W.aktion("qnap_abbrechen", {})["ablauf"], "installieren")
+
+    def test_seite(self):
+        for teil in ("function qProfilAbgleichen", "waehlenOffen", 'bauTimer = null; bauErwartet = "";'):
+            self.assertIn(teil, W.SEITE)
+        self.assertNotIn("qFormGeladen", W.SEITE)
+
+    def test_zweiter_start_wartet_nicht(self):
+        self.assertTrue(W._instanz_sperren())
+        try:
+            import subprocess
+            code = ("import sys, time; sys.path.insert(0, %r); import signier_werkzeug as W; t = time.monotonic(); "
+                    "ok = W._instanz_sperren(); print(ok, round(time.monotonic() - t, 1))") % os.path.dirname(HIER)
+            aus = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=os.environ).stdout.split()
+            self.assertEqual(aus[0], "False")
+            self.assertLess(float(aus[1]), 2)
+        finally:
+            os.close(W._INSTANZ.pop("fd"))
+
+    def test_beenden_nimmt_keine_neuen_aktionen_an(self):
+        server = W.Server.__new__(W.Server)
+        import threading
+        server._aktiv_lock, server.aktiv, server.endet = threading.Lock(), 0, True
+        with self.assertRaisesRegex(ValueError, "beendet"):
+            with server._aktion_laeuft():
+                pass
+
+
 class HochladenMeldungTests(unittest.TestCase):
     """N12: verlorene Antwort beim Vorspulen und beim Nachlesen."""
 
