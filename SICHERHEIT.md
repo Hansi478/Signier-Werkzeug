@@ -380,7 +380,8 @@ Der Bereich leitet SSH-Schritte auf einer QNAP an. Er ist bewusst eng gehalten:
   `SIGNATUR-BAU.json` bei einer Version, deren signierte `app.py` die Bau-Prüfung kennt, lehnt
   schon „Version laden und prüfen“ ab.
 - **Grenze:** Ältere Versionen (vor 1.8.8) haben keine Bau-Signatur - dort bleiben
-  `Dockerfile`, `docker-compose.yml` und `tools/` unsigniert; das Werkzeug listet sie auf.
+  `Dockerfile`, `docker-compose.yml` und `tools/` unsigniert; das Werkzeug übernimmt genau diese
+  Bau-Dateien trotzdem in die ZIP (sonst ließe sich nicht bauen) und listet sie auf.
 - **Prüfen der Dashboard-Adresse:** nur GET, ohne Token, ohne Proxy, Weiterleitungen werden
   nicht verfolgt. Angezeigt wird nur der Statuscode.
 - **Daten:** Profil und Ablauf in `qnap.json`, Protokoll in `qnap-protokoll.txt` (Zeit,

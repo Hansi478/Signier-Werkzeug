@@ -470,7 +470,7 @@ def _version_pruefen(version):
         raise ValueError(f"VERSION muss die Form x.y.z haben (z. B. 1.2.3), nicht {version!r}. Nichts geschrieben.")
 
 
-def _schreibweise_pruefen(wurzel):
+def _schreibweise_pruefen(wurzel, regel="alle"):
     """Feste Namen nur in genau dieser Schreibweise: Windows fände „version“ als
     „VERSION“ (das Ziel unter Linux nicht) und ersetzte beim Schreiben eine
     „Signatur.json“ - die frische Signatur wäre sofort ungültig."""
@@ -478,14 +478,15 @@ def _schreibweise_pruefen(wurzel):
         namen = os.listdir(wurzel)
     except OSError:
         return
-    for fest in ("VERSION", SIGNATUR_DATEI, BAU_SIGNATUR_DATEI, "app.py"):
+    feste = ("VERSION", SIGNATUR_DATEI) + ((BAU_SIGNATUR_DATEI, "app.py") if regel == "speedrace" else ())
+    for fest in feste:
         anders = [n for n in namen if n.casefold() == fest.casefold() and n != fest]
         if anders:
             raise ValueError(f"„{anders[0]}“ hat eine andere Schreibweise als „{fest}“ - bitte umbenennen. Nichts geschrieben.")
 
 
 def _dateiliste_zum_signieren(wurzel, profil):
-    _schreibweise_pruefen(wurzel)
+    _schreibweise_pruefen(wurzel, profil.get("regel", "alle"))
     kompilate = [] if profil.get("regel", "alle") != "speedrace" else None
     dateien = dateiliste(wurzel, profil.get("regel", "alle"), profil.get("ausschluss"), kompilate)
     if kompilate:   # würden nicht signiert, „Prüfen“ und das Prüfmodul lehnten sie danach ab
@@ -1934,13 +1935,17 @@ def qnap_paket(pr, token, tag, name, ziel, datei=None):
                              "nicht installieren.")
         if bau["stufe"] != "fehlt" and bau["version"] != version:
             raise ValueError(f"{tag}: Version in {BAU_SIGNATUR_DATEI} passt nicht zum Tag - nicht installieren.")
-        bau_signiert = set(bau_dateiliste(ordner)[0]) - set(bau["zusaetzlich"]) if bau["stufe"] != "fehlt" else set()
+        bau_ist = set(bau_dateiliste(ordner)[0])
+        bau_signiert = bau_ist - set(bau["zusaetzlich"]) if bau["stufe"] != "fehlt" else set()
+        # ältere Version ohne Bau-Signatur: Dockerfile, tools/ … gibt es nur unsigniert - ohne sie
+        # ließe sich nicht bauen (z. B. Rückkehr zu einer Version vor 1.8.8)
+        bau_unsigniert = bau_ist - signiert if bau["stufe"] == "fehlt" and pr.get("regel") == "speedrace" else set()
         eintraege = []
         _durchlaufen(ordner, "", lambda rel, n, ist_ordner: False, eintraege)
         alle = sorted(rel for rel, _ in eintraege)
         # nur Signiertes übernehmen: alles andere landete sonst ungeprüft im Programmordner
         # (z. B. eine fremde json.py, die Python vor der Standardbibliothek lädt)
-        dateien = [rel for rel in alle if rel in signiert or rel in bau_signiert
+        dateien = [rel for rel in alle if rel in signiert or rel in bau_signiert or rel in bau_unsigniert
                    or rel in (SIGNATUR_DATEI, BAU_SIGNATUR_DATEI)]
         if not dateien:
             raise ValueError(f"{tag}: keine signierten Dateien - nicht installieren.")
@@ -1969,7 +1974,8 @@ def qnap_paket(pr, token, tag, name, ziel, datei=None):
     return {"tag": tag, "version": version, "commit": commit, "zip": os.path.join(ziel, datei),
             "sha256": hashlib.sha256(daten).hexdigest(), "dateien": len(dateien), "signiert": len(signiert),
             "bau_signiert": len(bau_signiert), "bau_stufe": bau["stufe"], "bau_text": bau.get("text", ""),
-            "unsigniert": unsigniert[:200], "unsigniert_anzahl": len(unsigniert)}
+            "unsigniert": unsigniert[:200], "unsigniert_anzahl": len(unsigniert),
+            "bau_unsigniert": sorted(bau_unsigniert)[:200]}
 
 
 def qnap_aktion(name, p):
@@ -2944,7 +2950,7 @@ function qZeichnen() {
       <button class="zweit" data-qkopie="${s.nr}">Kopieren</button></div>`;
     if (s.id === "version" && QZ.lauf && QZ.lauf.paket) {
       const k = QZ.lauf.paket;
-      const bauT = k.bau_stufe === "fehlt" || k.bau_stufe == null ? " Keine Bau-Signatur (Version vor 1.8.8): Dockerfile, tools/ usw. sind nicht signiert."
+      const bauT = k.bau_stufe === "fehlt" || k.bau_stufe == null ? ` Keine Bau-Signatur (Version vor 1.8.8): ${(k.bau_unsigniert || []).length} Bau-Dateien (Dockerfile, tools/ usw.) sind nicht signiert, werden aber übernommen (sonst ließe sich nicht bauen).`
         : ` Bau-Signatur gültig (${k.bau_signiert} Bau-Dateien)${k.bau_stufe === "warn" ? " – Hinweis: " + esc(k.bau_text) : ""}.`;
       h += `<div class="status ok">✅ ${esc(k.tag)} – Signatur gültig (${k.signiert} signierte Dateien).${bauT} Commit <span class="mono">${esc(k.commit.slice(0, 7))}</span>,
         ZIP-Prüfsumme <span class="mono">${esc(k.sha256)}</span>.<details style="margin-top:6px"><summary>${k.unsigniert_anzahl} Dateien nicht von der Signatur erfasst

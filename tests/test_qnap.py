@@ -793,7 +793,13 @@ class PaketTests(unittest.TestCase):
     def test_speedrace_ohne_bau_signatur_obwohl_bekannt(self):
         self.pr.update(regel="speedrace", ausschluss=[])
         app = b'UPDATE_ALLOWED_FILES = ("app.py", "VERSION")\nUPDATE_ALLOWED_DIRS = ("templates",)\n'
-        self.assertEqual(self.laden(self.zipball(app=app))["bau_stufe"], "fehlt")   # ältere Version: erlaubt
+        r = self.laden(self.zipball(app=app))
+        self.assertEqual(r["bau_stufe"], "fehlt")   # ältere Version: erlaubt
+        # ohne Bau-Signatur: Bau-Dateien unsigniert übernehmen (sonst kein Bau möglich), Fremdes nicht
+        self.assertEqual(r["bau_unsigniert"], ["Dockerfile", "tools/start.sh"])
+        with zipfile.ZipFile(r["zip"]) as z:
+            self.assertIn("programmordner/Dockerfile", z.namelist())
+            self.assertNotIn("programmordner/skripte/lauf.sh", z.namelist())
         with self.assertRaisesRegex(ValueError, "Bau-Prüfung kennt"):
             self.laden(self.zipball(app=app + b"# --bau-pruefen\n"))
 

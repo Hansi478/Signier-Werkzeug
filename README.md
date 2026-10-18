@@ -118,7 +118,9 @@ Im Elternordner des Programmordners fasst das Werkzeug nur den Programmordner (u
 die selbst angelegten `….alt-…`/`….kaputt-…`-Ordner, den Zwischenordner `….entpacken-…` und die
 selbst hochgeladenen ZIPs (`<Programmordner>.signier-JJJJMMTT-hhmm.zip`) an – den Daten-Ordner
 daneben nie. In die ZIP kommen nur signierte Dateien (dazu die signierten Bau-Dateien und die
-Signaturdateien); alles andere aus dem Tag-Commit zeigt das Werkzeug als „nicht übernommen“. Protokoll (Zeit, Schritt, Befehl, Rückmeldung; keine
+Signaturdateien); alles andere aus dem Tag-Commit zeigt das Werkzeug als „nicht übernommen“.
+Ausnahme: Versionen vor 1.8.8 haben keine Bau-Signatur – deren Bau-Dateien (Dockerfile, tools/ …)
+kommen unsigniert mit und werden so angezeigt, sonst ließe sich nicht bauen. Protokoll (Zeit, Schritt, Befehl, Rückmeldung; keine
 Passwörter): `%APPDATA%\Signier-Werkzeug\qnap-protokoll.txt`. Details: SICHERHEIT.md,
 Abschnitt 7.
 
