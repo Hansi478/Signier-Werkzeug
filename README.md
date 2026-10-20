@@ -92,6 +92,9 @@ hochladen“** signiert genau diese Liste (Format `sr-pakete-signatur-1`, gleich
 lädt `SIGNATUR-PAKETE.json` in einem Commit auf den Zweig `pakete`. Nichts an main, kein Tag.
 Abgebrochen wird, wenn es den Tag `v<Version>` nicht gibt oder er keine gültige Signatur dieses
 Profils trägt; eine schon gültig signierte Liste wird nicht noch einmal hochgeladen.
+Enthält die Liste die Zeile `# cloudflared: <Version> amd64=<sha256> arm64=<sha256> armhf=<sha256>`,
+ist sie mitsigniert (die Signatur deckt die ganze Datei ab); das Werkzeug prüft ihr Format streng
+und zeigt die Änderung gegenüber der vorigen Liste an (z. B. „cloudflared 2026.9.1 → 2026.10.0“).
 
 ## QNAP (Dashboard auf dem NAS installieren oder neu bauen)
 

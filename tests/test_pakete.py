@@ -56,6 +56,28 @@ class FormatTests(unittest.TestCase):
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
         self.assertFalse(W.pakete_signatur_gueltig(daten, W.oeffentlich_text(Ed25519PrivateKey.generate()), SUMME, "9.9.9"))
 
+    def test_cloudflared_zeile(self):
+        a, b, c = "a" * 64, "b" * 64, "c" * 64
+        text = f"# Programmversion: 1.8.12\n# cloudflared: 2026.10.0 amd64={a} arm64={b} armhf={c}\n"
+        self.assertEqual(W.pakete_cloudflared(text),
+                         {"version": "2026.10.0", "sha256": {"amd64": a, "arm64": b, "armhf": c}})
+        self.assertIsNone(W.pakete_cloudflared("# Programmversion: 1.8.12\n"))
+        for falsch in (f"# cloudflared: 2026.10.0 amd64={a} arm64={b}",                 # Architektur fehlt
+                       f"# cloudflared: 2026.10.0 amd64={a} arm64={b} armhf={c} x86=1",  # zusätzlich
+                       f"# cloudflared: 2026.10.0 amd64={a} arm64={b} armhf={c[:-1]}",   # zu kurz
+                       f"# cloudflared: 2026.10.0 amd64={a.upper()} arm64={b} armhf={c}",
+                       f"# cloudflared: latest amd64={a} arm64={b} armhf={c}",
+                       f"# cloudflared: 2026.10.0 amd64={a} amd64={b} armhf={c}",
+                       f"# cloudflared: 2026.10.0 amd64={a} arm64={b} armhf={c}\n# cloudflared: 2026.9.0 amd64={a} arm64={b} armhf={c}"):
+            with self.subTest(falsch=falsch):
+                self.assertRaisesRegex(ValueError, "cloudflared-Zeile", W.pakete_cloudflared, falsch)
+        neu = f"# cloudflared: 2026.10.0 amd64={a} arm64={b} armhf={c}\n"
+        self.assertEqual(W._cloudflared_unterschied(None, neu), ["cloudflared 2026.10.0 (neu in der Liste)"])
+        self.assertEqual(W._cloudflared_unterschied(neu.replace("2026.10.0", "2026.9.1"), neu),
+                         ["cloudflared 2026.9.1 → 2026.10.0"])
+        self.assertEqual(W._cloudflared_unterschied(neu, neu), [])
+        self.assertIn("Prüfsummen geändert", W._cloudflared_unterschied(neu.replace(a, "d" * 64), neu)[0])
+
     def test_unterschiede(self):
         alt = "pypdf==6.20.1 \\\n    --hash=sha256:x\nalt_paket==1.0\nFlask==3.0.0\n"
         neu = "pypdf==6.21.1 \\\n    --hash=sha256:y\nflask==3.0.0\nneu-paket[extra]==2.0 ; python_version >= '3'\n"
@@ -91,9 +113,12 @@ class AblaufTests(unittest.TestCase):
 
         def baum(repo, token, commit):
             return [{"path": n, "type": "blob", "sha": W._git_blob_sha(b), "size": len(b)}
-                    for n, b in self.dateien["tag" if commit == self.tag else "pakete"].items()]
+                    for n, b in self.dateien["tag" if commit == self.tag else "vorher" if commit == "8" * 40
+                                             else "pakete"].items()]
 
         def gh(pfad, token, *a, **k):
+            if "/commits?" in pfad:   # Verlauf von PAKETE.lock auf dem Zweig
+                return [{"sha": "5" * 40}] + ([{"sha": "8" * 40}] if "vorher" in self.dateien else [])
             for gruppe in self.dateien.values():
                 for b in gruppe.values():
                     if pfad.endswith("/git/blobs/" + W._git_blob_sha(b)):
@@ -123,6 +148,16 @@ class AblaufTests(unittest.TestCase):
         d, hoch = self.lauf("pakete_signieren", kennwort=KENNWORT, summe=SUMME)
         self.assertIn("bereits signiert", d["meldung"])
         hoch.assert_not_called()
+
+    def test_cloudflared_im_ablauf(self):
+        zeile = "# cloudflared: 2026.10.0 amd64=" + "a" * 64 + " arm64=" + "b" * 64 + " armhf=" + "c" * 64 + "\n"
+        self.dateien["vorher"] = {W.PAKETE_DATEI: LOCK + zeile.replace("2026.10.0", "2026.9.1").encode()}
+        self.dateien["pakete"][W.PAKETE_DATEI] = LOCK + zeile.encode()
+        d, _ = self.lauf("pakete_pruefen")
+        self.assertEqual(d["cloudflared"], "2026.10.0")
+        self.assertIn("cloudflared 2026.9.1 → 2026.10.0", d["unterschiede"])
+        self.dateien["pakete"][W.PAKETE_DATEI] = LOCK + b"# cloudflared: kaputt\n"
+        self.assertRaisesRegex(ValueError, "cloudflared-Zeile", self.lauf, "pakete_pruefen")
 
     def test_abbrueche(self):
         # andere Liste als angezeigt

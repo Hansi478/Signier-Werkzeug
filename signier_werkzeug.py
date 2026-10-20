@@ -1509,6 +1509,59 @@ def _pakete_stand(text):
     return {re.sub(r"[-_.]+", "-", n).lower(): v for n, v in _PAKET_RE.findall(text)}
 
 
+CLOUDFLARED_ARCHITEKTUREN = ("amd64", "arm64", "armhf")
+_CLOUDFLARED_RE = re.compile(r"^# cloudflared:(.*)$", re.M)
+
+
+def pakete_cloudflared(text):
+    """Signierte cloudflared-Angabe der Paketliste
+    „# cloudflared: <Version> amd64=<sha256> arm64=<sha256> armhf=<sha256>“
+    -> {"version", "sha256": {Architektur: Prüfsumme}} oder None (keine Zeile).
+    Eine Zeile, die nicht genau so aussieht, ist ein Fehler - sonst würde eine
+    unbrauchbare Angabe mitsigniert."""
+    zeilen = _CLOUDFLARED_RE.findall(text)
+    if not zeilen:
+        return None
+    teile = zeilen[0].split()
+    paare = dict(t.split("=", 1) for t in teile[1:] if t.count("=") == 1)
+    if len(zeilen) > 1 or len(teile) != 1 + len(CLOUDFLARED_ARCHITEKTUREN) \
+            or not re.fullmatch(r"\d{4}\.\d{1,2}\.\d{1,4}", teile[0]) \
+            or set(paare) != set(CLOUDFLARED_ARCHITEKTUREN) \
+            or not all(re.fullmatch(r"[0-9a-f]{64}", v) for v in paare.values()):
+        raise ValueError(f"{PAKETE_DATEI}: die cloudflared-Zeile hat nicht das Format „# cloudflared: <Version> "
+                         + " ".join(f"{a}=<sha256>" for a in CLOUDFLARED_ARCHITEKTUREN) + "“ - nicht signiert.")
+    return {"version": teile[0], "sha256": paare}
+
+
+def _cloudflared_unterschied(alt, neu):
+    a, n = pakete_cloudflared(alt) if alt else None, pakete_cloudflared(neu)
+    if not n:
+        return []
+    if not a:
+        return [f"cloudflared {n['version']} (neu in der Liste)"]
+    if a["version"] != n["version"]:
+        return [f"cloudflared {a['version']} → {n['version']}"]
+    if a["sha256"] != n["sha256"]:
+        return [f"cloudflared {n['version']}: Prüfsummen geändert - bitte prüfen"]
+    return []
+
+
+def _vorige_paketliste(repo, token, stand):
+    """PAKETE.lock aus dem vorigen Commit des Zweigs „pakete“, der sie geändert
+    hat (für die Anzeige „alt → neu“), oder None."""
+    try:
+        commits = _gh(f"/repos/{repo}/commits?sha={stand}&path={PAKETE_DATEI}&per_page=2", token)
+        if not isinstance(commits, list) or len(commits) < 2:
+            return None
+        vorher = str(commits[1].get("sha") or "")
+        if not re.fullmatch(r"[0-9a-f]{40}", vorher):
+            return None
+        daten = _blob(repo, token, github_baum(repo, token, vorher), PAKETE_DATEI, PAKETE_MAX)
+        return daten.decode("utf-8") if daten else None
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
 def pakete_unterschiede(alt, neu):
     """Unterschiede der Paketversionen, z. B. „pypdf 6.20.1 → 6.21.1“."""
     a, n = _pakete_stand(alt), _pakete_stand(neu)
@@ -1553,6 +1606,7 @@ def pakete_stand(pr, token):
     if lock is None:
         raise ValueError(f"Keine Paketliste zum Signieren ({PAKETE_DATEI} fehlt auf dem Zweig „{PAKETE_ZWEIG}“).")
     version = pakete_version(lock)
+    cloudflared = pakete_cloudflared(lock.decode("utf-8"))   # Format prüfen, bevor etwas angezeigt wird
     summe = pakete_pruefsumme(lock)
     # die Liste muss zu einer signierten Programmversion gehören
     tag_commit = _tag_commit(repo, token, "v" + version)
@@ -1575,7 +1629,9 @@ def pakete_stand(pr, token):
         raise ValueError(f"requirements.lock im Tag v{version} passt nicht zur Signatur - abgebrochen.")
     vorhanden = _blob(repo, token, baum, PAKETE_SIGNATUR_DATEI, MAX_SIGNATUR_BYTES)
     return {"repo": repo, "stand": stand, "baum": baum, "version": version, "summe": summe,
-            "unterschiede": pakete_unterschiede(alt.decode("utf-8", "replace") if alt else "", lock.decode("utf-8")),
+            "unterschiede": pakete_unterschiede(alt.decode("utf-8", "replace") if alt else "", lock.decode("utf-8"))
+            + (_cloudflared_unterschied(_vorige_paketliste(repo, token, stand), lock.decode("utf-8")) if cloudflared else []),
+            "cloudflared": cloudflared["version"] if cloudflared else "",
             "bereits": bool(vorhanden) and pakete_signatur_gueltig(vorhanden, pr.get("oeffentlich") or "", summe, version)}
 
 
@@ -2383,7 +2439,7 @@ def aktion(name, p):
         if not token:
             raise ValueError("Dazu wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
         st = pakete_stand(pr, token)
-        return {k: st[k] for k in ("version", "summe", "unterschiede", "bereits")}
+        return {k: st[k] for k in ("version", "summe", "unterschiede", "bereits", "cloudflared")}
     if name == "pakete_signieren":
         if not token:
             raise ValueError("Dazu wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
@@ -2845,7 +2901,7 @@ Version __VERSION__ <button class="zweit info" id="info-knopf" title="Handbuch u
  <ul><li>Vorher: <span class="mono">VERSION</span> (Form x.y.z) erhöhen, committen und pushen.</li>
  <li>„Von GitHub laden, signieren und hochladen“: lädt den Stand des Zweigs, signiert, lädt <span class="mono">SIGNATUR.json</span> (beim Dashboard auch <span class="mono">SIGNATUR-BAU.json</span>) in einem Commit hoch und setzt den Tag <span class="mono">v&lt;Version&gt;</span>. Erst danach verteilen.</li>
  <li>Gibt es den Tag schon, bricht das Werkzeug ab, bevor etwas hochgeladen wird – Tags werden nie verschoben.</li>
- <li>„Paketliste prüfen / signieren“ (nur Dashboard): signiert die getestete <span class="mono">PAKETE.lock</span> vom Zweig „pakete“.</li>
+ <li>„Paketliste prüfen / signieren“ (nur Dashboard): signiert die getestete <span class="mono">PAKETE.lock</span> vom Zweig „pakete“ (Python-Pakete und, falls angegeben, die cloudflared-Version).</li>
  <li>„Ordner signieren“: für einen Ordner auf diesem Rechner (alle Dateien darin, auch nicht eingecheckte).</li></ul>
  <h3>4. Prüfen</h3>
  <ul><li>Prüft einen GitHub-Stand oder Ordner gegen die Signatur: zusätzliche, fehlende und veränderte Dateien werden aufgelistet.</li></ul>
@@ -2925,7 +2981,8 @@ $("s-pakete-pruefen").onclick = e => mit("s-status", e.target, "Lade die Paketli
   const p = profilPruefen($("s-profil").value);
   const d = await api("pakete_pruefen", {id: p.id});
   paketeSumme = d.bereits ? "" : d.summe;
-  $("s-pakete-info").innerHTML = `Programmversion <b>${esc(d.version)}</b>, Prüfsumme <span class="mono">${esc(d.summe)}</span>. `
+  $("s-pakete-info").innerHTML = `Programmversion <b>${esc(d.version)}</b>, Prüfsumme <span class="mono">${esc(d.summe)}</span>`
+    + (d.cloudflared ? `, cloudflared <b>${esc(d.cloudflared)}</b>` : "") + ". "
     + (d.unterschiede.length ? "Änderungen gegenüber v" + esc(d.version) + ":<ul>" + d.unterschiede.map(u => `<li class="mono">${esc(u)}</li>`).join("") + "</ul>"
        : "Keine Änderungen gegenüber v" + esc(d.version) + ". ");
   $("s-pakete-los-zeile").classList.toggle("versteckt", !!d.bereits);

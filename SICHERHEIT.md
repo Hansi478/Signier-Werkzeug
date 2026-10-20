@@ -113,6 +113,10 @@ Format `sr-pakete-signatur-1`, genau wie im Dashboard (`tools/signieren.py`: `pa
   Profils für genau diese Version liegt; `requirements.lock` des Tags (für die Anzeige der
   Unterschiede) muss zu dieser Signatur passen. Dateien kommen über ihren Git-Blob (Prüfsumme
   gegen den Git-Baum).
+- cloudflared: Die Zeile `# cloudflared: <Version> amd64=… arm64=… armhf=…` (Version
+  `JJJJ.M.N`, je Architektur genau eine SHA-256 in Kleinbuchstaben, keine weiteren Einträge,
+  höchstens eine Zeile) ist Teil der signierten Datei. Weicht sie vom Format ab, signiert das
+  Werkzeug nicht - eine unbrauchbare Angabe würde sonst mitsigniert.
 - Signiert wird genau die angezeigte Liste: Hat sie sich seit „Prüfen“ geändert, bricht das
   Werkzeug ab. Hochgeladen wird in einem Commit auf den Zweig `pakete` (nur vorspulen).
 
