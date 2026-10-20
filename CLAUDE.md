@@ -15,7 +15,8 @@
   (`docs/handbuch_quelle.html`, `Handbuch.pdf`) und in der README (vom Benutzer so gewünscht).
 - **Handbuch nur als PDF:** Ändert sich etwas, das Benutzer betrifft, `docs/handbuch_quelle.html`
   anpassen und mit `node docs/handbuch_pdf.js` `Handbuch.pdf` neu erzeugen – auch bei jeder
-  neuen Version (der Test prüft die Version im PDF). Private Schlüssel nie ins Repository.
+  neuen Version (der Test prüft die Version im PDF).
+- Private Schlüssel nie ins Repository.
 - Actions in Workflows nur mit vollständigen Commit-SHAs.
 - Tests: `python -m unittest discover -s tests -v`; Selbsttest:
   `python signier_werkzeug.py --selbsttest selbst.txt`.
