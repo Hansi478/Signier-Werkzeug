@@ -57,26 +57,34 @@ class FormatTests(unittest.TestCase):
         self.assertFalse(W.pakete_signatur_gueltig(daten, W.oeffentlich_text(Ed25519PrivateKey.generate()), SUMME, "9.9.9"))
 
     def test_cloudflared_zeile(self):
-        a, b, c = "a" * 64, "b" * 64, "c" * 64
-        text = f"# Programmversion: 1.8.12\n# cloudflared: 2026.10.0 amd64={a} arm64={b} armhf={c}\n"
-        self.assertEqual(W.pakete_cloudflared(text),
-                         {"version": "2026.10.0", "sha256": {"amd64": a, "arm64": b, "armhf": c}})
+        # Beispiel aus der Übergabe (Prüfsummen erfunden)
+        h = {"amd64": "1" * 64, "arm64": "2" * 64, "armhf": "3" * 64, "windows-amd64": "4" * 64}
+        zeile = "# cloudflared: 2026.10.0 " + " ".join(f"{k}={v}" for k, v in h.items())
+        text = "# Automatisch erzeugt\n# Programmversion: 1.8.13   (bei jeder neuen Version neu erzeugen)\n" + zeile + "\n"
+        self.assertEqual(W.pakete_cloudflared(text), {"version": "2026.10.0", "sha256": h})
+        self.assertEqual(W.pakete_cloudflared(text.replace("\n", "\r\n"))["version"], "2026.10.0")
+        umgestellt = "# cloudflared: 2026.10.0 " + " ".join(f"{k}={v}" for k, v in reversed(list(h.items())))
+        self.assertEqual(W.pakete_cloudflared(umgestellt)["sha256"], h)   # Reihenfolge egal
         self.assertIsNone(W.pakete_cloudflared("# Programmversion: 1.8.12\n"))
-        for falsch in (f"# cloudflared: 2026.10.0 amd64={a} arm64={b}",                 # Architektur fehlt
-                       f"# cloudflared: 2026.10.0 amd64={a} arm64={b} armhf={c} x86=1",  # zusätzlich
-                       f"# cloudflared: 2026.10.0 amd64={a} arm64={b} armhf={c[:-1]}",   # zu kurz
-                       f"# cloudflared: 2026.10.0 amd64={a.upper()} arm64={b} armhf={c}",
-                       f"# cloudflared: latest amd64={a} arm64={b} armhf={c}",
-                       f"# cloudflared: 2026.10.0 amd64={a} amd64={b} armhf={c}",
-                       f"# cloudflared: 2026.10.0 amd64={a} arm64={b} armhf={c}\n# cloudflared: 2026.9.0 amd64={a} arm64={b} armhf={c}"):
-            with self.subTest(falsch=falsch):
+        drei = " ".join(f"{k}={v}" for k, v in list(h.items())[:3])
+        for falsch in ("# cloudflared: 2026.10.0 " + drei,                                   # windows-amd64 fehlt
+                       zeile + " x86=" + "5" * 64,                                          # zusätzlich
+                       zeile + " ",                                                         # Leerzeichen am Ende
+                       zeile.replace(" arm64", "  arm64"),                                  # zwei Leerzeichen
+                       zeile.replace("1" * 64, "1" * 63),                                   # zu kurz
+                       zeile.replace("1" * 64, "A" * 64),                                   # groß
+                       zeile.replace("2026.10.0", "2026.10.1000"),                          # Patch > 3 Ziffern
+                       zeile.replace("2026.10.0", "latest"),
+                       zeile.replace("arm64=" + "2" * 64, "amd64=" + "2" * 64),             # doppelt
+                       zeile + "\n" + zeile):                                               # zwei Zeilen
+            with self.subTest(falsch=falsch[-40:]):
                 self.assertRaisesRegex(ValueError, "cloudflared-Zeile", W.pakete_cloudflared, falsch)
-        neu = f"# cloudflared: 2026.10.0 amd64={a} arm64={b} armhf={c}\n"
-        self.assertEqual(W._cloudflared_unterschied(None, neu), ["cloudflared 2026.10.0 (neu in der Liste)"])
+        neu = zeile + "\n"
+        self.assertEqual(W._cloudflared_unterschied(None, neu), ["cloudflared 2026.10.0 (bisher keine)"])
         self.assertEqual(W._cloudflared_unterschied(neu.replace("2026.10.0", "2026.9.1"), neu),
                          ["cloudflared 2026.9.1 → 2026.10.0"])
         self.assertEqual(W._cloudflared_unterschied(neu, neu), [])
-        self.assertIn("Prüfsummen geändert", W._cloudflared_unterschied(neu.replace(a, "d" * 64), neu)[0])
+        self.assertIn("Prüfsummen geändert", W._cloudflared_unterschied(neu.replace("1" * 64, "9" * 64), neu)[0])
 
     def test_unterschiede(self):
         alt = "pypdf==6.20.1 \\\n    --hash=sha256:x\nalt_paket==1.0\nFlask==3.0.0\n"
@@ -117,7 +125,7 @@ class AblaufTests(unittest.TestCase):
                                              else "pakete"].items()]
 
         def gh(pfad, token, *a, **k):
-            if "/commits?" in pfad:   # Verlauf von PAKETE.lock auf dem Zweig
+            if "/commits?" in pfad:   # Verlauf des Zweigs „pakete“
                 return [{"sha": "5" * 40}] + ([{"sha": "8" * 40}] if "vorher" in self.dateien else [])
             for gruppe in self.dateien.values():
                 for b in gruppe.values():
@@ -149,12 +157,22 @@ class AblaufTests(unittest.TestCase):
         self.assertIn("bereits signiert", d["meldung"])
         hoch.assert_not_called()
 
+    def zeile(self, version):
+        return ("# cloudflared: " + version + " amd64=" + "a" * 64 + " arm64=" + "b" * 64 + " armhf=" + "c" * 64
+                + " windows-amd64=" + "d" * 64 + "\n").encode()
+
     def test_cloudflared_im_ablauf(self):
-        zeile = "# cloudflared: 2026.10.0 amd64=" + "a" * 64 + " arm64=" + "b" * 64 + " armhf=" + "c" * 64 + "\n"
-        self.dateien["vorher"] = {W.PAKETE_DATEI: LOCK + zeile.replace("2026.10.0", "2026.9.1").encode()}
-        self.dateien["pakete"][W.PAKETE_DATEI] = LOCK + zeile.encode()
+        alt = LOCK + self.zeile("2026.9.1")
+        # vorige Liste noch unsigniert: kein Vergleich
+        self.dateien["vorher"] = {W.PAKETE_DATEI: alt}
+        self.dateien["pakete"][W.PAKETE_DATEI] = LOCK + self.zeile("2026.10.0")
         d, _ = self.lauf("pakete_pruefen")
         self.assertEqual(d["cloudflared"], "2026.10.0")
+        self.assertIn("cloudflared 2026.10.0 (bisher keine)", d["unterschiede"])
+        # vorige Liste gültig signiert: „alt → neu“
+        sig = W.pakete_signatur_bauen(self.privat, "9.9.9", W.pakete_pruefsumme(alt), "2030-01-01")
+        self.dateien["vorher"][W.PAKETE_SIGNATUR_DATEI] = sig.encode()
+        d, _ = self.lauf("pakete_pruefen")
         self.assertIn("cloudflared 2026.9.1 → 2026.10.0", d["unterschiede"])
         self.dateien["pakete"][W.PAKETE_DATEI] = LOCK + b"# cloudflared: kaputt\n"
         self.assertRaisesRegex(ValueError, "cloudflared-Zeile", self.lauf, "pakete_pruefen")

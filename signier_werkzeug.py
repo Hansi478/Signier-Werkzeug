@@ -1509,36 +1509,41 @@ def _pakete_stand(text):
     return {re.sub(r"[-_.]+", "-", n).lower(): v for n, v in _PAKET_RE.findall(text)}
 
 
-CLOUDFLARED_ARCHITEKTUREN = ("amd64", "arm64", "armhf")
-_CLOUDFLARED_RE = re.compile(r"^# cloudflared:(.*)$", re.M)
+CLOUDFLARED_ARCHITEKTUREN = ("amd64", "arm64", "armhf", "windows-amd64")
+_CLOUDFLARED_ZEILE = re.compile(r"^# cloudflared:.*$", re.M)
+# genau wie app.py bzw. tools/signieren.py im Dashboard
+_CLOUDFLARED_RE = re.compile(r"^# cloudflared: (\d{4}\.\d{1,2}\.\d{1,3})((?: [a-z0-9-]+=[0-9a-f]{64})+)$")
 
 
 def pakete_cloudflared(text):
     """Signierte cloudflared-Angabe der Paketliste
-    „# cloudflared: <Version> amd64=<sha256> arm64=<sha256> armhf=<sha256>“
+    „# cloudflared: <Version> amd64=<sha256> arm64=<sha256> armhf=<sha256> windows-amd64=<sha256>“
     -> {"version", "sha256": {Architektur: Prüfsumme}} oder None (keine Zeile).
     Eine Zeile, die nicht genau so aussieht, ist ein Fehler - sonst würde eine
     unbrauchbare Angabe mitsigniert."""
-    zeilen = _CLOUDFLARED_RE.findall(text)
+    zeilen = _CLOUDFLARED_ZEILE.findall(text.replace("\r\n", "\n"))
     if not zeilen:
         return None
-    teile = zeilen[0].split()
-    paare = dict(t.split("=", 1) for t in teile[1:] if t.count("=") == 1)
-    if len(zeilen) > 1 or len(teile) != 1 + len(CLOUDFLARED_ARCHITEKTUREN) \
-            or not re.fullmatch(r"\d{4}\.\d{1,2}\.\d{1,4}", teile[0]) \
-            or set(paare) != set(CLOUDFLARED_ARCHITEKTUREN) \
-            or not all(re.fullmatch(r"[0-9a-f]{64}", v) for v in paare.values()):
+    m = _CLOUDFLARED_RE.fullmatch(zeilen[0]) if len(zeilen) == 1 else None
+    paare = [t.split("=", 1) for t in m.group(2).split(" ")[1:]] if m else []
+    if not m or sorted(a for a, _ in paare) != sorted(CLOUDFLARED_ARCHITEKTUREN):
         raise ValueError(f"{PAKETE_DATEI}: die cloudflared-Zeile hat nicht das Format „# cloudflared: <Version> "
-                         + " ".join(f"{a}=<sha256>" for a in CLOUDFLARED_ARCHITEKTUREN) + "“ - nicht signiert.")
-    return {"version": teile[0], "sha256": paare}
+                         + " ".join(f"{a}=<sha256>" for a in CLOUDFLARED_ARCHITEKTUREN) + "“ (je Architektur genau "
+                         "einmal, ein Leerzeichen zwischen den Feldern) - nicht signiert.")
+    return {"version": m.group(1), "sha256": dict(paare)}
 
 
 def _cloudflared_unterschied(alt, neu):
-    a, n = pakete_cloudflared(alt) if alt else None, pakete_cloudflared(neu)
+    """alt: zuletzt signierte Liste auf dem Zweig (oder None), neu: die zu signierende."""
+    try:
+        a = pakete_cloudflared(alt) if alt else None
+    except ValueError:
+        a = None
+    n = pakete_cloudflared(neu)
     if not n:
         return []
     if not a:
-        return [f"cloudflared {n['version']} (neu in der Liste)"]
+        return [f"cloudflared {n['version']} (bisher keine)"]
     if a["version"] != n["version"]:
         return [f"cloudflared {a['version']} → {n['version']}"]
     if a["sha256"] != n["sha256"]:
@@ -1546,20 +1551,25 @@ def _cloudflared_unterschied(alt, neu):
     return []
 
 
-def _vorige_paketliste(repo, token, stand):
-    """PAKETE.lock aus dem vorigen Commit des Zweigs „pakete“, der sie geändert
-    hat (für die Anzeige „alt → neu“), oder None."""
+def _zuletzt_signierte_paketliste(repo, token, stand, oeffentlich, tiefe=10):
+    """PAKETE.lock, die auf dem Zweig „pakete“ zuletzt gültig signiert war (vor
+    dem Stand `stand`), für die Anzeige „alt → neu“ - oder None."""
     try:
-        commits = _gh(f"/repos/{repo}/commits?sha={stand}&path={PAKETE_DATEI}&per_page=2", token)
-        if not isinstance(commits, list) or len(commits) < 2:
-            return None
-        vorher = str(commits[1].get("sha") or "")
-        if not re.fullmatch(r"[0-9a-f]{40}", vorher):
-            return None
-        daten = _blob(repo, token, github_baum(repo, token, vorher), PAKETE_DATEI, PAKETE_MAX)
-        return daten.decode("utf-8") if daten else None
+        commits = _gh(f"/repos/{repo}/commits?sha={stand}&per_page={tiefe + 1}", token)
+        for c in commits[1:] if isinstance(commits, list) else []:
+            sha = str((c or {}).get("sha") or "")
+            if not re.fullmatch(r"[0-9a-f]{40}", sha):
+                continue
+            baum = github_baum(repo, token, sha)
+            lock = _blob(repo, token, baum, PAKETE_DATEI, PAKETE_MAX)
+            sig = _blob(repo, token, baum, PAKETE_SIGNATUR_DATEI, MAX_SIGNATUR_BYTES)
+            if lock and sig:
+                version = pakete_version(lock)
+                if pakete_signatur_gueltig(sig, oeffentlich, pakete_pruefsumme(lock), version):
+                    return lock.decode("utf-8")
     except (ValueError, UnicodeDecodeError):
-        return None
+        pass
+    return None
 
 
 def pakete_unterschiede(alt, neu):
@@ -1630,7 +1640,8 @@ def pakete_stand(pr, token):
     vorhanden = _blob(repo, token, baum, PAKETE_SIGNATUR_DATEI, MAX_SIGNATUR_BYTES)
     return {"repo": repo, "stand": stand, "baum": baum, "version": version, "summe": summe,
             "unterschiede": pakete_unterschiede(alt.decode("utf-8", "replace") if alt else "", lock.decode("utf-8"))
-            + (_cloudflared_unterschied(_vorige_paketliste(repo, token, stand), lock.decode("utf-8")) if cloudflared else []),
+            + (_cloudflared_unterschied(_zuletzt_signierte_paketliste(repo, token, stand, pr.get("oeffentlich") or ""),
+                                       lock.decode("utf-8")) if cloudflared else []),
             "cloudflared": cloudflared["version"] if cloudflared else "",
             "bereits": bool(vorhanden) and pakete_signatur_gueltig(vorhanden, pr.get("oeffentlich") or "", summe, version)}
 
