@@ -1,38 +1,353 @@
 <!doctype html><html lang="de"><head><meta charset="utf-8">
 <!-- Quelle von Handbuch.pdf. Neu erzeugen (nach jeder Änderung und bei jeder neuen Version):
-     node docs/handbuch_pdf.js   (braucht playwright-core und Chromium) -->
+     node docs/handbuch_bilder.js   (Bildschirmfotos, nur bei Änderungen der Oberfläche)
+     node docs/handbuch_pdf.js      (braucht playwright-core und Chromium) -->
 <title>Handbuch – Signier-Werkzeug {{VERSION}}</title><style>
-body{font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;color:#111;margin:0}
-h2{font-size:20px;margin:0 0 12px}h3{font-size:15px;margin:16px 0 4px;break-after:avoid}
-p,li{font-size:13.5px}ul{margin:6px 0 0 18px;padding:0}li{break-inside:avoid}
-.mono{font-family:ui-monospace,Consolas,monospace}
-.copy{margin-top:18px;border-top:1px solid #999;padding-top:10px;color:#333}
-@page{margin:18mm}
+:root{--blau:#2563eb;--hell:#eff6ff;--grau:#64748b;--rand:#cbd5e1;--gruen:#16a34a;--gelb:#d97706;--rot:#dc2626}
+body{font:10.5pt/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;color:#0f172a;margin:0}
+h1{font-size:26pt;margin:0 0 6px;color:var(--blau)}h2{font-size:16pt;margin:0 0 8px;padding-bottom:4px;border-bottom:2px solid var(--blau);break-after:avoid}
+h3{font-size:12pt;margin:16px 0 4px;break-after:avoid}p{margin:6px 0}ul,ol{margin:6px 0 6px 20px;padding:0}li{margin:2px 0;break-inside:avoid}
+.kapitel{break-before:page}.mono,code{font-family:ui-monospace,Consolas,monospace;font-size:9.5pt}
+figure{margin:10px 0 14px;break-inside:avoid;text-align:center}figure img{max-width:100%;border:1px solid var(--rand);border-radius:6px}
+figure img.schmal{max-width:62%}figcaption{font-size:9pt;color:var(--grau);margin-top:4px}
+figure svg{max-width:100%;height:auto}
+.kasten{border-left:4px solid var(--blau);background:var(--hell);padding:8px 12px;margin:10px 0;break-inside:avoid;border-radius:0 6px 6px 0}
+.kasten.warn{border-color:var(--gelb);background:#fffbeb}.kasten.gefahr{border-color:var(--rot);background:#fef2f2}
+table{border-collapse:collapse;width:100%;margin:8px 0;font-size:9.5pt;break-inside:auto}th,td{border:1px solid var(--rand);padding:5px 7px;text-align:left;vertical-align:top}
+th{background:#f1f5f9}tr{break-inside:avoid}
+.titel{height:240mm;display:flex;flex-direction:column;justify-content:center}.titel .unter{font-size:14pt;color:var(--grau)}
+.inhalt{padding-left:30px}.inhalt li{margin:3px 0}.copy{margin-top:18px;border-top:1px solid var(--rand);padding-top:8px;color:var(--grau);font-size:9pt}
+@page{size:A4;margin:16mm 16mm 18mm}
 </style></head><body>
-<h2>Handbuch – Signier-Werkzeug {{VERSION}}</h2>
-<p>Das Werkzeug signiert Programmversionen mit einem eigenen Schlüssel (Ed25519), damit die eingesetzte
- Software nur Versionen annimmt, die wirklich vom Herausgeber stammen. Der private Schlüssel verlässt diesen
- Rechner nie; er liegt mit Kennwort verschlüsselt im Datenordner.</p>
- <h3>1. Profile &amp; Schlüssel</h3>
- <ul><li>Je Software ein Profil: „Speedrace-Dashboard“ (feste Regeln des Dashboards) oder „andere Software“ (alle Dateien außer Ausnahmen).</li>
- <li>„Neuen Schlüssel erzeugen“ (Kennwort mind. 12 Zeichen) oder eine vorhandene <span class="mono">.pem</span> übernehmen. Den Ordner <span class="mono">schluessel</span> im Datenordner zusätzlich auf einen USB-Stick sichern.</li>
- <li>Den öffentlichen Schlüssel dort eintragen, wo geprüft wird. Für „andere Software“ erzeugt „Prompt erzeugen“ einen Text, mit dem eine andere Sitzung die Prüfung einbaut.</li></ul>
- <h3>2. GitHub</h3>
- <ul><li>Ein Token (fein granular, Rechte „Contents: Read and write“ für das Repository) eintragen. Es wird unter Windows mit DPAPI verschlüsselt gespeichert.</li></ul>
- <h3>3. Signieren</h3>
- <ul><li>Vorher: <span class="mono">VERSION</span> (Form x.y.z) erhöhen, committen und pushen.</li>
- <li>„Von GitHub laden, signieren und hochladen“: lädt den Stand des Zweigs, signiert, lädt <span class="mono">SIGNATUR.json</span> (beim Dashboard auch <span class="mono">SIGNATUR-BAU.json</span>) in einem Commit hoch und setzt den Tag <span class="mono">v&lt;Version&gt;</span>. Erst danach verteilen.</li>
- <li>Gibt es den Tag schon, bricht das Werkzeug ab, bevor etwas hochgeladen wird – Tags werden nie verschoben.</li>
- <li>„Paketliste prüfen / signieren“ (nur Dashboard): signiert die getestete <span class="mono">PAKETE.lock</span> vom Zweig „pakete“ (Python-Pakete und, falls angegeben, die cloudflared-Version).</li>
- <li>„Ordner signieren“: für einen Ordner auf diesem Rechner (alle Dateien darin, auch nicht eingecheckte).</li></ul>
- <h3>4. Prüfen</h3>
- <ul><li>Prüft einen GitHub-Stand oder Ordner gegen die Signatur: zusätzliche, fehlende und veränderte Dateien werden aufgelistet.</li></ul>
- <h3>5. QNAP</h3>
- <ul><li>Führt Schritt für Schritt durch Installieren, Neubauen, Zurück zur vorigen Version und Aufräumen auf dem NAS. Jeder Befehl wird vorher angezeigt und erst nach Bestätigung in einem Konsolenfenster ausgeführt; das Ergebnis meldest du zurück.</li>
- <li>Vor jedem Neubau werden die Bau-Dateien geprüft (Ergebnis 0: frei, 1: nur nach Bestätigung, 2: gesperrt). Ein beiseitegelegter alter Ordner bleibt der Rückweg, bis „Aufräumen“ ihn löscht.</li></ul>
- <h3>6. Updates des Werkzeugs</h3>
- <ul><li>Neue Versionen erscheinen oben als „Update“. Sie werden nur eingespielt, wenn die Signatur des Herausgebers gültig ist.</li></ul>
- <h3>Daten</h3>
- <p>Profile, Schlüssel, Protokolle: <span class="mono">%APPDATA%\Signier-Werkzeug</span>. Ausführlich: README.md und SICHERHEIT.md im Repository <span class="mono">{{REPO}}</span>.</p>
- <p class="copy">© 2026 Hans-Christoph Rose. Alle Rechte vorbehalten.</p>
+
+<!-- ===================== Titel ===================== -->
+<section class="titel">
+ <h1>Signier-Werkzeug</h1>
+ <div class="unter">Handbuch zur Version {{VERSION}}</div>
+ <figure style="margin:28px 0;text-align:left">
+  <svg viewBox="0 0 640 150" width="640" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" font-size="13">
+   <defs><marker id="p0" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#2563eb"/></marker></defs>
+   <rect x="0" y="35" width="170" height="80" rx="10" fill="#eff6ff" stroke="#2563eb"/><text x="85" y="68" text-anchor="middle" font-weight="700">Dein Rechner</text><text x="85" y="88" text-anchor="middle">signiert mit dem</text><text x="85" y="104" text-anchor="middle">privaten Schlüssel</text>
+   <rect x="235" y="35" width="170" height="80" rx="10" fill="#f8fafc" stroke="#64748b"/><text x="320" y="68" text-anchor="middle" font-weight="700">GitHub</text><text x="320" y="88" text-anchor="middle">Version + SIGNATUR.json</text><text x="320" y="104" text-anchor="middle">Tag v&lt;Version&gt;</text>
+   <rect x="470" y="35" width="170" height="80" rx="10" fill="#f0fdf4" stroke="#16a34a"/><text x="555" y="68" text-anchor="middle" font-weight="700">Installation</text><text x="555" y="88" text-anchor="middle">prüft mit dem</text><text x="555" y="104" text-anchor="middle">öffentlichen Schlüssel</text>
+   <line x1="172" y1="75" x2="231" y2="75" stroke="#2563eb" stroke-width="2.5" marker-end="url(#p0)"/><line x1="407" y1="75" x2="466" y2="75" stroke="#2563eb" stroke-width="2.5" marker-end="url(#p0)"/>
+  </svg>
+ </figure>
+ <p style="max-width:150mm">Das Werkzeug sorgt dafür, dass deine Software nur Versionen annimmt, die wirklich von dir
+ stammen und unterwegs nicht verändert wurden.</p>
+ <p class="copy" style="margin-top:40px">© 2026 Hans-Christoph Rose. Alle Rechte vorbehalten.</p>
+</section>
+
+<!-- ===================== Inhalt ===================== -->
+<section class="kapitel">
+ <h2>Inhalt</h2>
+ <ol class="inhalt">
+  <li>Worum es geht – Grundbegriffe</li>
+  <li>Start, Oberfläche, Updates</li>
+  <li>Profile und Schlüssel</li>
+  <li>GitHub-Zugang</li>
+  <li>Eine Version signieren</li>
+  <li>Paketliste signieren (Speedrace-Dashboard)</li>
+  <li>Signatur prüfen</li>
+  <li>QNAP: Dashboard auf dem NAS installieren</li>
+  <li>Andere Software einbinden (Prompt zur Einbindung)</li>
+  <li>Das Werkzeug selbst veröffentlichen (Herausgeber)</li>
+  <li>Meldungen und was zu tun ist</li>
+  <li>Daten, Sicherung und Sicherheit</li>
+ </ol>
+ <div class="kasten"><b>Kurz gesagt:</b> Profil anlegen → Schlüssel erzeugen und sichern → GitHub-Token eintragen →
+ nach jeder neuen Version „Von GitHub laden, signieren und hochladen“ → erst danach verteilen.</div>
+</section>
+
+<!-- ===================== 1 ===================== -->
+<section class="kapitel">
+ <h2>1. Worum es geht – Grundbegriffe</h2>
+ <p>Eine Software, die sich selbst aktualisiert, muss erkennen können, ob ein Update echt ist. Dafür
+ signierst du jede Version: Das Werkzeug bildet über alle Dateien einer Version eine Prüfsumme und
+ unterschreibt diese Liste mit deinem <b>privaten Schlüssel</b>. Die installierte Software kennt nur deinen
+ <b>öffentlichen Schlüssel</b> und kann damit nachrechnen, ob jede Datei genau so ist, wie du sie signiert hast.</p>
+ <table>
+  <tr><th style="width:28%">Begriff</th><th>Bedeutung</th></tr>
+  <tr><td>Privater Schlüssel</td><td>Bleibt auf deinem Rechner, mit Kennwort verschlüsselt (Ed25519). Wer ihn hat, kann in deinem Namen signieren – deshalb nie weitergeben, nur sichern.</td></tr>
+  <tr><td>Öffentlicher Schlüssel</td><td>44 Zeichen Base64, z. B. <span class="mono">Fy29YaD6…qVsc=</span>. Steht in der Software, die prüft. Darf jeder sehen.</td></tr>
+  <tr><td>Fingerabdruck</td><td>Kurzform des öffentlichen Schlüssels in Vierergruppen. Zum Vergleichen über einen zweiten Weg (Telefon, persönlich).</td></tr>
+  <tr><td><span class="mono">SIGNATUR.json</span></td><td>Liste aller Dateien mit Prüfsumme, Version und Signatur. Liegt im Wurzelordner der Version.</td></tr>
+  <tr><td><span class="mono">SIGNATUR-BAU.json</span></td><td>Nur Speedrace-Dashboard: Signatur der Bau-Dateien (Dockerfile, docker-compose.yml, tools/ …), aus denen das Docker-Image entsteht.</td></tr>
+  <tr><td>Tag <span class="mono">v&lt;Version&gt;</span></td><td>Markiert auf GitHub genau den signierten Stand, z. B. <span class="mono">v1.8.12</span>. Das Werkzeug setzt ihn selbst und verschiebt ihn nie.</td></tr>
+  <tr><td>Profil</td><td>Eine Software mit ihrem eigenen Schlüssel, Repository und ihren Regeln, welche Dateien signiert werden.</td></tr>
+ </table>
+ <figure>
+  <svg viewBox="0 0 700 210" width="700" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" font-size="12.5">
+   <defs><marker id="p1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#475569"/></marker></defs>
+   <rect x="10" y="20" width="150" height="170" rx="10" fill="#f8fafc" stroke="#cbd5e1"/><text x="85" y="42" text-anchor="middle" font-weight="700">Version 1.4.0</text>
+   <g font-family="ui-monospace,Consolas,monospace" font-size="11"><text x="28" y="70">programm.py</text><text x="28" y="92">daten/vorlage.txt</text><text x="28" y="114">VERSION</text><text x="28" y="136">…</text></g>
+   <rect x="225" y="45" width="150" height="120" rx="10" fill="#eff6ff" stroke="#2563eb"/><text x="300" y="72" text-anchor="middle" font-weight="700">Prüfsummen</text><text x="300" y="94" text-anchor="middle">SHA-256 je Datei</text><text x="300" y="116" text-anchor="middle">+ Version</text><text x="300" y="138" text-anchor="middle">+ Format</text>
+   <rect x="440" y="45" width="120" height="120" rx="10" fill="#fef3c7" stroke="#d97706"/><text x="500" y="85" text-anchor="middle" font-weight="700">Signatur</text><text x="500" y="107" text-anchor="middle">mit privatem</text><text x="500" y="125" text-anchor="middle">Schlüssel</text>
+   <rect x="610" y="65" width="80" height="80" rx="8" fill="#f0fdf4" stroke="#16a34a"/><text x="650" y="100" text-anchor="middle" font-size="11" font-family="ui-monospace,Consolas,monospace">SIGNATUR</text><text x="650" y="116" text-anchor="middle" font-size="11" font-family="ui-monospace,Consolas,monospace">.json</text>
+   <line x1="162" y1="105" x2="221" y2="105" stroke="#475569" stroke-width="2" marker-end="url(#p1)"/><line x1="377" y1="105" x2="436" y2="105" stroke="#475569" stroke-width="2" marker-end="url(#p1)"/><line x1="562" y1="105" x2="606" y2="105" stroke="#475569" stroke-width="2" marker-end="url(#p1)"/>
+  </svg>
+  <figcaption>Abbildung 1: Aus den Dateien einer Version entsteht <span class="mono">SIGNATUR.json</span>.</figcaption>
+ </figure>
+ <h3>Welche Dateien werden signiert?</h3>
+ <table>
+  <tr><th style="width:24%">Profil</th><th>Signiert</th><th>Nie signiert</th></tr>
+  <tr><td>Speedrace-Dashboard</td><td>Genau die Update-Dateien, die das Dashboard selbst festlegt (<span class="mono">UPDATE_ALLOWED_FILES</span>/<span class="mono">…_DIRS</span> in <span class="mono">app.py</span>); dazu die Bau-Dateien in <span class="mono">SIGNATUR-BAU.json</span>.</td><td rowspan="2"><span class="mono">SIGNATUR.json</span>, <span class="mono">.git/</span>, <span class="mono">.github/</span> (Wurzel), <span class="mono">__pycache__</span>, <span class="mono">*.pyc</span></td></tr>
+  <tr><td>Andere Software</td><td>Alle Dateien außer den Ausnahmen des Profils (z. B. <span class="mono">logs/*</span>, <span class="mono">*.log</span>). Groß-/Kleinschreibung zählt.</td></tr>
+ </table>
+</section>
+
+<!-- ===================== 2 ===================== -->
+<section class="kapitel">
+ <h2>2. Start, Oberfläche, Updates</h2>
+ <p><b>Start:</b> <span class="mono">Signier-Werkzeug.exe</span> doppelklicken. Das Werkzeug öffnet sich im Browser
+ (nur auf diesem Rechner, unter <span class="mono">127.0.0.1</span>, mit einem Zufallsschlüssel in der Adresse). Beim
+ ersten Start warnt Windows evtl. „Der Computer wurde durch Windows geschützt“ – „Weitere Informationen“ →
+ „Trotzdem ausführen“.</p>
+ <figure><img src="bilder/01_start.png"><figcaption>Abbildung 2: Startseite – oben die Reiter, rechts Version, „i“ (dieses Handbuch) und „Beenden“.</figcaption></figure>
+ <ul>
+  <li><b>Reiter:</b> Signieren · Prüfen · Profile &amp; Schlüssel · GitHub · QNAP.</li>
+  <li><b>Nur eine Instanz:</b> Ein zweiter Start öffnet die laufende Seite, statt ein zweites Werkzeug zu starten.</li>
+  <li><b>Beenden:</b> mit „Beenden“. Läuft gerade etwas (Signieren, Hochladen, ein offenes Auswahlfenster), wird das abgelehnt, damit nichts halb erledigt bleibt. Ohne geöffnete Seite beendet sich das Werkzeug nach 10 Minuten von selbst – nie mitten in einem Vorgang.</li>
+  <li><b>Updates:</b> Gibt es eine neuere Version, erscheint oben „Update“. Ein Klick lädt sie, prüft die Signatur des Herausgebers und startet neu. Ohne gültige Signatur ändert sich nichts.</li>
+  <li><b>Zwei Tabs:</b> Hast du dasselbe Profil in zwei Tabs offen, lehnt das Werkzeug das Speichern aus dem älteren Tab ab („inzwischen geändert – neu laden“) – nichts wird still überschrieben.</li>
+ </ul>
+</section>
+
+<!-- ===================== 3 ===================== -->
+<section class="kapitel">
+ <h2>3. Profile und Schlüssel</h2>
+ <p>Im Reiter <b>Profile &amp; Schlüssel</b> legst du je Software ein Profil an: „+ Profil „Speedrace-Dashboard““ für das
+ Dashboard (feste Regeln) oder „+ Profil für andere Software“.</p>
+ <figure><img src="bilder/03_profil_liste.png"><figcaption>Abbildung 3: Profilliste – „Schlüssel ✓“ heißt: Schlüsseldatei vorhanden.</figcaption></figure>
+ <h3>Profil anlegen</h3>
+ <ol>
+  <li>Name, Regel („Welche Dateien werden signiert?“), GitHub-Repository (<span class="mono">Besitzer/Name</span>) und Zweig eintragen.</li>
+  <li>Bei „andere Software“: Ausnahmen, je Zeile ein Muster – z. B. <span class="mono">logs/*</span> (ganzer Ordner) oder <span class="mono">*.log</span>. Ausnahmen gehören zum „Vertrag“ mit der Software: Änderst du sie, muss die Software sie gleich ändern.</li>
+  <li>„Speichern“.</li>
+ </ol>
+ <figure><img src="bilder/06_profil_neu.png"><figcaption>Abbildung 4: Neues Profil.</figcaption></figure>
+ <h3>Schlüssel erzeugen oder übernehmen</h3>
+ <ul>
+  <li><b>Neuen Schlüssel erzeugen:</b> Kennwort (mind. 12 Zeichen) zweimal eingeben. Das Kennwort wird nirgends gespeichert – gut aufbewahren.</li>
+  <li><b>Vorhandenen Schlüssel übernehmen:</b> <span class="mono">.pem</span>-Datei wählen und ihr Kennwort eingeben.</li>
+  <li>Danach zeigt das Profil den <b>öffentlichen Schlüssel</b> mit „Kopieren“ – diesen trägst du dort ein, wo geprüft wird (beim Dashboard z. B. <span class="mono">SR_UPDATE_SCHLUESSEL</span>).</li>
+ </ul>
+ <figure><img src="bilder/04_profil_bearbeiten.png"><figcaption>Abbildung 5: Profil mit Schlüssel und Prompt zur Einbindung.</figcaption></figure>
+ <div class="kasten gefahr"><b>Sichern!</b> Kopiere den Ordner <span class="mono">schluessel</span> im Datenordner (Reiter „Profile &amp; Schlüssel“ → „Sicherung“ → „Ordner öffnen“) auf einen USB-Stick. Ohne Schlüssel kannst du keine neuen Versionen mehr signieren, die die installierte Software annimmt.</div>
+ <div class="kasten warn"><b>Schlüsseldatei fehlt?</b> Ist für ein Profil schon ein öffentlicher Schlüssel hinterlegt, die Datei aber weg (z. B. auf den USB-Stick verschoben), zeigt das Werkzeug „Schlüsseldatei fehlt“ und lässt nur die <b>passende</b> gesicherte Datei wieder zu. Ein neuer Schlüssel würde die Prüfung in der Software brechen – dafür ein neues Profil anlegen.</div>
+ <p><b>Profil löschen:</b> Die Schlüsseldatei wird nicht gelöscht, sondern umbenannt (<span class="mono">….geloescht-Datum</span>).</p>
+</section>
+
+<!-- ===================== 4 ===================== -->
+<section class="kapitel">
+ <h2>4. GitHub-Zugang</h2>
+ <p>Zum Laden und Hochladen braucht das Werkzeug ein <b>Fine-grained Token</b>:</p>
+ <ol>
+  <li>GitHub → Settings → Developer settings → Fine-grained tokens → „Generate new token“.</li>
+  <li>Repository access: nur die betroffenen Repositories.</li>
+  <li>Permissions: <b>Contents: Read and write</b>.</li>
+  <li>Token im Reiter <b>GitHub</b> einfügen → „Speichern“.</li>
+ </ol>
+ <figure><img src="bilder/07_github.png"><figcaption>Abbildung 6: Reiter „GitHub“ – oben das Token, unten die Aktionen für das Werkzeug selbst (Kapitel 10).</figcaption></figure>
+ <p>Unter Windows wird das Token mit DPAPI verschlüsselt (nur für deinen Windows-Benutzer lesbar). In Meldungen und Protokollen wird es geschwärzt.</p>
+</section>
+
+<!-- ===================== 5 ===================== -->
+<section class="kapitel">
+ <h2>5. Eine Version signieren</h2>
+ <figure>
+  <svg viewBox="0 0 720 120" width="720" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" font-size="12">
+   <defs><marker id="p2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#2563eb"/></marker></defs>
+   <g><rect x="0" y="25" width="125" height="70" rx="10" fill="#f8fafc" stroke="#94a3b8"/><text x="62" y="52" text-anchor="middle" font-weight="700">1. VERSION</text><text x="62" y="72" text-anchor="middle">erhöhen (x.y.z)</text></g>
+   <g><rect x="148" y="25" width="125" height="70" rx="10" fill="#f8fafc" stroke="#94a3b8"/><text x="210" y="52" text-anchor="middle" font-weight="700">2. Commit</text><text x="210" y="72" text-anchor="middle">und Push</text></g>
+   <g><rect x="296" y="25" width="125" height="70" rx="10" fill="#eff6ff" stroke="#2563eb"/><text x="358" y="52" text-anchor="middle" font-weight="700">3. Signieren</text><text x="358" y="72" text-anchor="middle">im Werkzeug</text></g>
+   <g><rect x="444" y="25" width="125" height="70" rx="10" fill="#eff6ff" stroke="#2563eb"/><text x="506" y="48" text-anchor="middle" font-weight="700">4. Hochladen</text><text x="506" y="66" text-anchor="middle">+ Tag setzen</text><text x="506" y="84" text-anchor="middle" font-size="10.5">(automatisch)</text></g>
+   <g><rect x="592" y="25" width="125" height="70" rx="10" fill="#f0fdf4" stroke="#16a34a"/><text x="654" y="52" text-anchor="middle" font-weight="700">5. Verteilen</text><text x="654" y="72" text-anchor="middle">Update einspielen</text></g>
+   <g stroke="#2563eb" stroke-width="2.2"><line x1="126" y1="60" x2="145" y2="60" marker-end="url(#p2)"/><line x1="274" y1="60" x2="293" y2="60" marker-end="url(#p2)"/><line x1="422" y1="60" x2="441" y2="60" marker-end="url(#p2)"/><line x1="570" y1="60" x2="589" y2="60" marker-end="url(#p2)"/></g>
+  </svg>
+  <figcaption>Abbildung 7: Ablauf je Version – Schritte 3 und 4 erledigt ein Klick.</figcaption>
+ </figure>
+ <h3>Von GitHub laden, signieren und hochladen (empfohlen)</h3>
+ <ol>
+  <li>In der Software <span class="mono">VERSION</span> erhöhen (genau <span class="mono">x.y.z</span>, ohne BOM), committen und pushen.</li>
+  <li>Reiter <b>Signieren</b>: Profil wählen → „Von GitHub laden, signieren und hochladen“ → Kennwort.</li>
+  <li>Das Werkzeug lädt den Stand des Zweigs, prüft ihn, signiert, lädt <span class="mono">SIGNATUR.json</span> (beim Dashboard auch <span class="mono">SIGNATUR-BAU.json</span>) in <b>einem</b> Commit genau auf diesen Stand hoch und setzt den Tag <span class="mono">v&lt;Version&gt;</span>.</li>
+  <li>Erst jetzt die Version verteilen bzw. das Update einspielen.</li>
+ </ol>
+ <figure><img src="bilder/08_signieren.png"><figcaption>Abbildung 8: Reiter „Signieren“ mit dem Speedrace-Profil (unten das Beispiel einer geprüften Paketliste, Kapitel 6).</figcaption></figure>
+ <figure><img class="schmal" src="bilder/09_kennwort.png"><figcaption>Abbildung 9: Abfrage des Kennworts vor dem Signieren.</figcaption></figure>
+ <div class="kasten"><b>Sicherheitsregeln beim Hochladen:</b> Hat jemand zwischendurch etwas auf den Zweig gepusht, bricht das Werkzeug ab. Gibt es den Tag schon, bricht es ab, <b>bevor</b> etwas hochgeladen wird – ein Tag wird nie verschoben. Erneutes Signieren derselben Version lädt nichts doppelt hoch, sondern setzt nur einen fehlenden Tag.</div>
+ <h3>Einen Ordner auf diesem Rechner signieren</h3>
+ <p>„… oder einen Ordner auf diesem Rechner signieren“ aufklappen, Ordner wählen, „Ordner signieren“. Signiert werden alle
+ Dateien darin – auch nicht eingecheckte (z. B. <span class="mono">Thumbs.db</span>). Für genau den Repository-Stand
+ besser den GitHub-Weg nehmen. Liegt dort eine <span class="mono">SIGNATUR.json</span> mit fremdem Schlüssel, wird sie vorher im Datenordner gesichert.</p>
+ <figure><img src="bilder/10_signiert.png"><figcaption>Abbildung 10: Ordner signiert.</figcaption></figure>
+ <div class="kasten warn"><b>Kompilierte Python-Dateien</b> (<span class="mono">__pycache__</span>, <span class="mono">*.pyc</span>) werden nicht signiert, würden aber geladen. Liegen welche im Ordner, brechen Signieren und Prüfen ab – vorher löschen.</div>
+</section>
+
+<!-- ===================== 6 ===================== -->
+<section class="kapitel">
+ <h2>6. Paketliste signieren (Speedrace-Dashboard)</h2>
+ <p>Neuere Python-Pakete (und, falls angegeben, cloudflared) sollen ohne neue Programmversion zu den Dashboards kommen –
+ aber nur getestet und von dir signiert.</p>
+ <figure>
+  <svg viewBox="0 0 720 130" width="720" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" font-size="12">
+   <defs><marker id="p3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#475569"/></marker></defs>
+   <rect x="0" y="25" width="160" height="80" rx="10" fill="#f8fafc" stroke="#94a3b8"/><text x="80" y="52" text-anchor="middle" font-weight="700">GitHub-Action</text><text x="80" y="72" text-anchor="middle">testet neue Pakete</text><text x="80" y="90" text-anchor="middle">(monatlich)</text>
+   <rect x="185" y="25" width="160" height="80" rx="10" fill="#f8fafc" stroke="#94a3b8"/><text x="265" y="52" text-anchor="middle" font-weight="700">Zweig „pakete“</text><text x="265" y="72" text-anchor="middle" font-family="ui-monospace,Consolas,monospace" font-size="11">PAKETE.lock</text><text x="265" y="90" text-anchor="middle">+ Issue „bereit“</text>
+   <rect x="370" y="25" width="160" height="80" rx="10" fill="#eff6ff" stroke="#2563eb"/><text x="450" y="52" text-anchor="middle" font-weight="700">Signier-Werkzeug</text><text x="450" y="72" text-anchor="middle">prüfen, signieren</text><text x="450" y="90" text-anchor="middle" font-family="ui-monospace,Consolas,monospace" font-size="10.5">SIGNATUR-PAKETE.json</text>
+   <rect x="555" y="25" width="160" height="80" rx="10" fill="#f0fdf4" stroke="#16a34a"/><text x="635" y="52" text-anchor="middle" font-weight="700">Dashboard</text><text x="635" y="72" text-anchor="middle">bietet Paket-Update</text><text x="635" y="90" text-anchor="middle">an (Admin-Knopf)</text>
+   <g stroke="#475569" stroke-width="2"><line x1="161" y1="65" x2="181" y2="65" marker-end="url(#p3)"/><line x1="346" y1="65" x2="366" y2="65" marker-end="url(#p3)"/><line x1="531" y1="65" x2="551" y2="65" marker-end="url(#p3)"/></g>
+  </svg>
+  <figcaption>Abbildung 11: Weg einer Paketliste.</figcaption>
+ </figure>
+ <ol>
+  <li>Reiter <b>Signieren</b>, Speedrace-Profil wählen → <b>„Paketliste prüfen“</b> (ohne Kennwort). Angezeigt werden Programmversion, Prüfsumme, cloudflared-Version und die geänderten Pakete, z. B. „pypdf 6.20.1 → 6.21.1“.</li>
+  <li>Änderungen ansehen. Passt alles: <b>„Paketliste signieren und hochladen“</b> → Kennwort.</li>
+  <li><span class="mono">SIGNATUR-PAKETE.json</span> landet in einem Commit auf dem Zweig „pakete“. Nichts an <span class="mono">main</span>, kein Tag.</li>
+ </ol>
+ <div class="kasten">Das Werkzeug signiert nur, wenn die Liste zu einer gültig signierten Programmversion gehört (Tag <span class="mono">v&lt;Version&gt;</span> mit gültiger <span class="mono">SIGNATUR.json</span>), und genau die Liste, die du gesehen hast. Ist sie schon gültig signiert, meldet es „bereits signiert“.</div>
+</section>
+
+<!-- ===================== 7 ===================== -->
+<section class="kapitel">
+ <h2>7. Signatur prüfen</h2>
+ <p>Reiter <b>Prüfen</b>: Profil wählen, dann „Stand auf GitHub prüfen“ (Zweig des Profils) oder einen Ordner wählen und
+ „Ordner prüfen“. Das Werkzeug rechnet jede Datei nach.</p>
+ <figure><img src="bilder/11_pruefen_ok.png"><figcaption>Abbildung 12: Alles in Ordnung.</figcaption></figure>
+ <figure><img src="bilder/12_pruefen_fehler.png"><figcaption>Abbildung 13: Abweichungen – jede betroffene Datei mit Grund (verändert, zusätzlich, fehlt).</figcaption></figure>
+ <p>Beim Speedrace-Dashboard werden zusätzlich die Bau-Dateien geprüft; eine angepasste <span class="mono">docker-compose.yml</span> ist nur ein Hinweis.</p>
+</section>
+
+<!-- ===================== 8 ===================== -->
+<section class="kapitel">
+ <h2>8. QNAP: Dashboard auf dem NAS installieren</h2>
+ <p>Der Reiter <b>QNAP</b> führt Schritt für Schritt durch die Arbeit auf dem NAS. Jeder Befehl wird vorher gezeigt und
+ erst nach deiner Bestätigung in einem eigenen Konsolenfenster (Windows-ssh) ausgeführt. Dein Passwort tippst du nur
+ dort – das Werkzeug sieht es nicht.</p>
+ <h3>Vorbereitung</h3>
+ <ul>
+  <li>In QTS: Systemsteuerung → Netzwerk- &amp; Dateidienste → Telnet/SSH → „SSH-Verbindung zulassen“; unter Windows 11 zusätzlich „SFTP aktivieren“.</li>
+  <li>QNAP-Profil ausfüllen: Host/IP, Port, Benutzer (Admin), Programmordner (absolut), optional Dashboard-Adresse, „Versionen von“ (dein Speedrace-Profil) → „Profil speichern“.</li>
+ </ul>
+ <figure><img src="bilder/13_qnap_profil.png"><figcaption>Abbildung 14: QNAP-Profil (Beispielwerte).</figcaption></figure>
+ <h3>Abläufe</h3>
+ <table>
+  <tr><th style="width:28%">Ablauf</th><th>Wofür</th></tr>
+  <tr><td>Neue Version installieren</td><td>Signierte Version (Tag) laden und prüfen → hochladen → Container anhalten → alten Ordner beiseitelegen → entpacken → Bau-Dateien prüfen → neu bauen → starten → kontrollieren → optional aufräumen.</td></tr>
+  <tr><td>Nur neu bauen</td><td>Gleiche Version, neues Image – z. B. für aktuelle Systempakete oder ein neues cloudflared.</td></tr>
+  <tr><td>Zur vorigen Version zurück</td><td>Den beiseitegelegten Ordner zurückholen, prüfen, (falls nötig) neu bauen und starten.</td></tr>
+  <tr><td>Aufräumen</td><td>Beiseitegelegten Ordner endgültig löschen, hochgeladene ZIP und alte Images entfernen – erst, wenn die neue Version läuft.</td></tr>
+ </table>
+ <figure>
+  <svg viewBox="0 0 720 230" width="720" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" font-size="11.5">
+   <defs><marker id="p4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0L10,5L0,10z" fill="#475569"/></marker>
+         <marker id="p5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0L10,5L0,10z" fill="#dc2626"/></marker></defs>
+   <g stroke="#94a3b8" fill="#f8fafc">
+    <rect x="0" y="20" width="105" height="50" rx="8"/><rect x="123" y="20" width="105" height="50" rx="8"/><rect x="246" y="20" width="105" height="50" rx="8"/>
+    <rect x="369" y="20" width="105" height="50" rx="8"/><rect x="492" y="20" width="105" height="50" rx="8"/><rect x="615" y="20" width="105" height="50" rx="8"/></g>
+   <g text-anchor="middle"><text x="52" y="42">Version laden</text><text x="52" y="58">und prüfen</text><text x="175" y="42">ZIP</text><text x="175" y="58">hochladen</text>
+    <text x="298" y="42">alten Ordner</text><text x="298" y="58">beiseitelegen</text><text x="421" y="42">entpacken</text><text x="421" y="58">(mit Prüfsumme)</text>
+    <text x="544" y="42">Bau-Dateien</text><text x="544" y="58">prüfen</text><text x="667" y="42">bauen,</text><text x="667" y="58">starten</text></g>
+   <g stroke="#475569" stroke-width="2"><line x1="106" y1="45" x2="120" y2="45" marker-end="url(#p4)"/><line x1="229" y1="45" x2="243" y2="45" marker-end="url(#p4)"/><line x1="352" y1="45" x2="366" y2="45" marker-end="url(#p4)"/><line x1="475" y1="45" x2="489" y2="45" marker-end="url(#p4)"/><line x1="598" y1="45" x2="612" y2="45" marker-end="url(#p4)"/></g>
+   <rect x="246" y="140" width="228" height="60" rx="8" fill="#fef2f2" stroke="#dc2626"/>
+   <text x="360" y="165" text-anchor="middle" font-weight="700">Rückweg</text><text x="360" y="184" text-anchor="middle">„Zur vorigen Version zurück“</text>
+   <path d="M298 72 L298 138" stroke="#dc2626" stroke-width="2" stroke-dasharray="5 4" fill="none" marker-end="url(#p5)"/>
+   <text x="306" y="110" fill="#dc2626">alter Ordner bleibt gemerkt</text>
+   <path d="M600 72 C600 120 520 168 476 170" stroke="#dc2626" stroke-width="2" stroke-dasharray="5 4" fill="none" marker-end="url(#p5)"/>
+   <text x="612" y="112" fill="#dc2626">bei Problemen</text>
+  </svg>
+  <figcaption>Abbildung 15: „Neue Version installieren“ – solange der alte Ordner gemerkt ist, gibt es einen Rückweg.</figcaption>
+ </figure>
+ <h3>So arbeitest du einen Schritt ab</h3>
+ <ol>
+  <li>Ablauf wählen → „Ablauf beginnen“. Freigegeben ist immer nur der nächste Schritt.</li>
+  <li>Erklärung lesen. Der Befehl steht im grauen Feld („Kopieren“ für eigene Notizen).</li>
+  <li>„Im SSH-Fenster ausführen“ → im Fenster ggf. Passwort eingeben → Ausgabe ansehen.</li>
+  <li>Zurück im Werkzeug: „Hat geklappt“ oder „Fehler“ melden. Bei „Fehler“ helfen die „Typischen Fehler und Abhilfe“.</li>
+ </ol>
+ <figure><img src="bilder/14_qnap_ablauf.png"><figcaption>Abbildung 16: Erster Schritt – nur lesen und bestätigen.</figcaption></figure>
+ <figure><img src="bilder/15_qnap_schritt.png"><figcaption>Abbildung 17: Ein Schritt mit Befehl.</figcaption></figure>
+ <h3>Bau-Prüfung vor jedem Neubau</h3>
+ <figure>
+  <svg viewBox="0 0 700 92" width="700" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" font-size="12">
+   <rect x="0" y="10" width="225" height="72" rx="10" fill="#f0fdf4" stroke="#16a34a"/><circle cx="30" cy="46" r="13" fill="#16a34a"/><text x="30" y="51" text-anchor="middle" fill="#fff" font-weight="700">0</text><text x="52" y="40" font-weight="700">OK</text><text x="52" y="60">Neubau frei</text>
+   <rect x="237" y="10" width="225" height="72" rx="10" fill="#fffbeb" stroke="#d97706"/><circle cx="267" cy="46" r="13" fill="#d97706"/><text x="267" y="51" text-anchor="middle" fill="#fff" font-weight="700">1</text><text x="289" y="40" font-weight="700">HINWEIS</text><text x="289" y="60">nur nach Bestätigung</text>
+   <rect x="474" y="10" width="225" height="72" rx="10" fill="#fef2f2" stroke="#dc2626"/><circle cx="504" cy="46" r="13" fill="#dc2626"/><text x="504" y="51" text-anchor="middle" fill="#fff" font-weight="700">2</text><text x="526" y="40" font-weight="700">FEHLER</text><text x="526" y="60">Neubau gesperrt</text>
+  </svg>
+  <figcaption>Abbildung 18: Ergebnis der Bau-Prüfung (<span class="mono">app.py --bau-pruefen</span>).</figcaption>
+ </figure>
+ <ul>
+  <li>Steht statt „Ergebnis=…“ <b>„Ergebnis fehlt“</b>, lief keine Prüfung (z. B. sudo-Kennwort falsch, Container läuft nicht) – „Fehler“ melden.</li>
+  <li>Ergebnis 2 sperrt den Neubau für genau diese Dateien. Kommt ein anderer Stand in den Programmordner (neue Version, Rückweg), fällt die Sperre. „Bau-Sperre aufheben“ nur, wenn du die Bau-Dateien selbst aus der signierten Version neu geholt hast.</li>
+  <li>Hat die Installation noch kein neues Image gebaut (z. B. ohne Internet), darf der Rückweg den Neubau überspringen.</li>
+ </ul>
+ <div class="kasten warn">Nicht am Tag vor oder am Veranstaltungstag umbauen. Das Werkzeug fasst im Elternordner nur den Programmordner, die selbst angelegten <span class="mono">….alt-…</span>/<span class="mono">….kaputt-…</span>/<span class="mono">….entpacken-…</span>-Ordner und die eigenen ZIPs an – den Daten-Ordner nie. Alles steht im Protokoll („Ordner mit Protokoll öffnen“).</div>
+</section>
+
+<!-- ===================== 9 ===================== -->
+<section class="kapitel">
+ <h2>9. Andere Software einbinden (Prompt zur Einbindung)</h2>
+ <p>Für ein Profil „andere Software“ mit Schlüssel erzeugt <b>„Prompt erzeugen“</b> einen Text für eine KI-Sitzung, die im
+ Repository dieser Software die Prüfung einbaut: mit öffentlichem Schlüssel, Fingerabdruck, Ausnahmen, Regeln, Ablauf
+ und dem Prüfmodul <span class="mono">Pruefmodul/signatur_pruefen.py</span>. Er enthält kein Token und keinen privaten Schlüssel.</p>
+ <figure><img src="bilder/05_prompt.png"><figcaption>Abbildung 19: Prompt zur Einbindung – „Kopieren“ oder „Als .md speichern“.</figcaption></figure>
+ <ul>
+  <li>Der Schlüssel ist in der Software nur Voreinstellung; ersetzen darf ihn nur der Betreiber (Umgebungsvariable/Admin-Einstellung), nie eine Datei aus einem Update.</li>
+  <li>Tags setzt nur das Signier-Werkzeug – keine automatischen Tag-Workflows in der Software.</li>
+  <li>Die Software prüft <b>vor</b> dem Installieren und installiert genau den geprüften Ordner.</li>
+ </ul>
+</section>
+
+<!-- ===================== 10 ===================== -->
+<section style="margin-top:22px">
+ <h2>10. Das Werkzeug selbst veröffentlichen (Herausgeber)</h2>
+ <p>Nur für den Herausgeber des Signier-Werkzeugs (Reiter <b>GitHub</b> → „Signier-Werkzeug selbst“, Abbildung 6):</p>
+ <ol>
+  <li><span class="mono">VERSION</span> in <span class="mono">signier_werkzeug.py</span> erhöhen und nach <span class="mono">main</span> bringen.</li>
+  <li>„Bau starten (Tag setzen)“: setzt <span class="mono">v&lt;Version&gt;</span> auf <span class="mono">main</span>; GitHub baut die exe (feste Paketversionen, Tests, Selbsttest, Herkunftsnachweis) und legt einen <b>Entwurf</b> an. Fortschritt: „Bau-Status prüfen“.</li>
+  <li>„Neuen Entwurf signieren und veröffentlichen“ → Kennwort: prüft die Herkunft der exe (Prüfsumme aus dem Bau, Tag auf dem gebauten Commit, Commit auf main), signiert sie und veröffentlicht das Release. Erst dann sehen andere Installationen das Update.</li>
+ </ol>
+</section>
+
+<!-- ===================== 11 ===================== -->
+<section class="kapitel">
+ <h2>11. Meldungen und was zu tun ist</h2>
+ <table>
+  <tr><th style="width:42%">Meldung (sinngemäß)</th><th>Bedeutung und Abhilfe</th></tr>
+  <tr><td>VERSION fehlt oder hat nicht die Form x.y.z / beginnt mit einem BOM</td><td><span class="mono">VERSION</span> korrigieren (z. B. <span class="mono">1.4.0</span>, UTF-8 ohne BOM), committen, erneut signieren.</td></tr>
+  <tr><td>Tag v… gibt es schon</td><td>Diese Version ist schon vergeben. Neue Versionsnummer vergeben – Tags werden nie verschoben.</td></tr>
+  <tr><td>Auf GitHub hat sich zwischendurch etwas geändert</td><td>Jemand hat gepusht. Einfach noch einmal signieren.</td></tr>
+  <tr><td>Unklar, ob die Signatur auf GitHub angekommen ist</td><td>Netzproblem. Später erneut signieren (lädt nichts doppelt hoch, setzt nur den Tag). Bis dahin nicht verteilen.</td></tr>
+  <tr><td>Kompilierte Python-Dateien gefunden</td><td><span class="mono">__pycache__</span>-Ordner und <span class="mono">*.pyc</span> löschen.</td></tr>
+  <tr><td>„…“ hat eine andere Schreibweise als „VERSION“/„SIGNATUR.json“</td><td>Datei genau so benennen (Groß-/Kleinschreibung).</td></tr>
+  <tr><td>Kennwort falsch oder Schlüsseldatei beschädigt</td><td>Kennwort prüfen; notfalls die gesicherte Schlüsseldatei übernehmen.</td></tr>
+  <tr><td>Profil wurde inzwischen geändert</td><td>Seite neu laden und die Änderung erneut eintragen.</td></tr>
+  <tr><td>Diese Dateien passen nicht zur Signatur</td><td>Etwas wurde verändert oder hinzugefügt. Nicht installieren – Version neu holen.</td></tr>
+  <tr><td>QNAP: Ergebnis fehlt – keine Prüfung gelaufen</td><td>Ausgabe im Fenster ansehen (sudo, Container, Docker-Variante), „Fehler“ melden, Hilfe beachten.</td></tr>
+  <tr><td>QNAP: subsystem request failed</td><td>In QTS „SFTP aktivieren“ und den Schritt wiederholen.</td></tr>
+ </table>
+</section>
+
+<!-- ===================== 12 ===================== -->
+<section class="kapitel">
+ <h2>12. Daten, Sicherung und Sicherheit</h2>
+ <table>
+  <tr><th style="width:34%">Was</th><th>Wo (Datenordner <span class="mono">%APPDATA%\Signier-Werkzeug</span>)</th></tr>
+  <tr><td>Profile, Einstellungen</td><td><span class="mono">profile.json</span></td></tr>
+  <tr><td>Private Schlüssel (verschlüsselt)</td><td><span class="mono">schluessel\</span> – <b>auf USB-Stick sichern</b></td></tr>
+  <tr><td>Gesicherte fremde Signaturen</td><td><span class="mono">sicherung\</span></td></tr>
+  <tr><td>QNAP-Profil, Ablauf, Protokoll</td><td><span class="mono">qnap.json</span>, <span class="mono">qnap-protokoll.txt</span></td></tr>
+ </table>
+ <h3>Was das Werkzeug für dich absichert</h3>
+ <ul>
+  <li>Die Oberfläche läuft nur auf diesem Rechner; jede Anfrage braucht den Zufallsschlüssel der Sitzung.</li>
+  <li>Das Token geht nur an GitHub und wird in Meldungen geschwärzt.</li>
+  <li>Archive von GitHub werden vor dem Entpacken geprüft (keine Pfade nach außen, keine Verknüpfungen, Größen- und Mengengrenzen).</li>
+  <li>Dateien werden atomar geschrieben – ein Abbruch hinterlässt keine halbe <span class="mono">SIGNATUR.json</span>.</li>
+  <li>Updates des Werkzeugs werden nur mit gültiger Signatur des Herausgebers eingespielt.</li>
+ </ul>
+ <p>Ausführlich: <span class="mono">README.md</span> und <span class="mono">SICHERHEIT.md</span> im Repository <span class="mono">{{REPO}}</span>.</p>
+ <p class="copy">© 2026 Hans-Christoph Rose. Alle Rechte vorbehalten. · Signier-Werkzeug {{VERSION}}</p>
+</section>
 </body></html>

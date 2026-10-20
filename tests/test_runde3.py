@@ -259,6 +259,10 @@ class HandbuchTests(unittest.TestCase):
             quelle = f.read()
         for teil in ("Profile &amp; Schlüssel", "Signieren", "Prüfen", "QNAP", "© 2026 Hans-Christoph Rose"):
             self.assertIn(teil, quelle)
+        bilder = re.findall(r'src="(bilder/[^"]+)"', quelle)
+        self.assertGreaterEqual(len(bilder), 10)
+        for b in bilder:   # jedes Bild liegt vor (docs/handbuch_bilder.js)
+            self.assertTrue(os.path.isfile(os.path.join(os.path.dirname(HIER), "docs", *b.split("/"))), b)
 
     def test_server_liefert_pdf_nur_mit_token(self):
         import http.client

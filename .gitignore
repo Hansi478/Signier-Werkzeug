@@ -6,3 +6,4 @@ __pycache__/
 selbst.txt
 # private Schlüssel gehören nie ins Repository
 *.pem
+docs/.handbuch_druck.html

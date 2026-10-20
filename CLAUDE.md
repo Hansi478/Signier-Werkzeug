@@ -14,8 +14,9 @@
   samt öffentlichem Herausgeber-Schlüssel, und der Copyright-Vermerk des Urhebers im Handbuch
   (`docs/handbuch_quelle.html`, `Handbuch.pdf`) und in der README (vom Benutzer so gewünscht).
 - **Handbuch nur als PDF:** Ändert sich etwas, das Benutzer betrifft, `docs/handbuch_quelle.html`
-  anpassen und mit `node docs/handbuch_pdf.js` `Handbuch.pdf` neu erzeugen – auch bei jeder
-  neuen Version (der Test prüft die Version im PDF).
+  anpassen; ändert sich die Oberfläche, die Bildschirmfotos mit `node docs/handbuch_bilder.js`
+  neu machen (nur Beispieldaten/Platzhalter). Dann mit `node docs/handbuch_pdf.js`
+  `Handbuch.pdf` neu erzeugen – auch bei jeder neuen Version (der Test prüft die Version im PDF).
 - Private Schlüssel nie ins Repository.
 - Actions in Workflows nur mit vollständigen Commit-SHAs.
 - Tests: `python -m unittest discover -s tests -v`; Selbsttest:

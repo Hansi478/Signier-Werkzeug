@@ -179,7 +179,9 @@ Kennwort sicher aufbewahren. Private Schlüssel gehören nie in dieses Repositor
 ## Hilfe und Copyright
 
 Das „i“ neben der Versionsnummer öffnet das Handbuch als PDF ([Handbuch.pdf](Handbuch.pdf), in der
-exe enthalten). Quelle: `docs/handbuch_quelle.html`; nach Änderungen und bei jeder neuen Version
-mit `node docs/handbuch_pdf.js` neu erzeugen (ein Test prüft, dass die Version im PDF stimmt).
+exe enthalten) – ausführlich, mit Bildschirmfotos und Abbildungen. Quelle: `docs/handbuch_quelle.html`
+mit den Bildern in `docs/bilder/`. Bildschirmfotos neu: `node docs/handbuch_bilder.js` (startet das
+Werkzeug mit Beispieldaten); PDF neu – nach Änderungen und bei jeder neuen Version:
+`node docs/handbuch_pdf.js` (ein Test prüft, dass die Version im PDF stimmt).
 
 © 2026 Hans-Christoph Rose. Alle Rechte vorbehalten.
