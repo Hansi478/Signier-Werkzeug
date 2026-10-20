@@ -69,7 +69,7 @@ jobs:
         run: python -m unittest discover -s tests -v
 
       - name: Bauen
-        run: python -m PyInstaller --noconfirm --onefile --noconsole --name Signier-Werkzeug --icon signier.ico --hidden-import cryptography.hazmat.primitives.asymmetric.ed25519 signier_werkzeug.py
+        run: python -m PyInstaller --noconfirm --onefile --noconsole --name Signier-Werkzeug --icon signier.ico --hidden-import cryptography.hazmat.primitives.asymmetric.ed25519 --add-data "Handbuch.pdf:." signier_werkzeug.py
 
       - name: Selbsttest der exe
         shell: pwsh

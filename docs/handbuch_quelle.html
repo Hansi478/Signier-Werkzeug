@@ -1,0 +1,38 @@
+<!doctype html><html lang="de"><head><meta charset="utf-8">
+<!-- Quelle von Handbuch.pdf. Neu erzeugen (nach jeder Änderung und bei jeder neuen Version):
+     node docs/handbuch_pdf.js   (braucht playwright-core und Chromium) -->
+<title>Handbuch – Signier-Werkzeug {{VERSION}}</title><style>
+body{font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;color:#111;margin:0}
+h2{font-size:20px;margin:0 0 12px}h3{font-size:15px;margin:16px 0 4px;break-after:avoid}
+p,li{font-size:13.5px}ul{margin:6px 0 0 18px;padding:0}li{break-inside:avoid}
+.mono{font-family:ui-monospace,Consolas,monospace}
+.copy{margin-top:18px;border-top:1px solid #999;padding-top:10px;color:#333}
+@page{margin:18mm}
+</style></head><body>
+<h2>Handbuch – Signier-Werkzeug {{VERSION}}</h2>
+<p>Das Werkzeug signiert Programmversionen mit einem eigenen Schlüssel (Ed25519), damit die eingesetzte
+ Software nur Versionen annimmt, die wirklich vom Herausgeber stammen. Der private Schlüssel verlässt diesen
+ Rechner nie; er liegt mit Kennwort verschlüsselt im Datenordner.</p>
+ <h3>1. Profile &amp; Schlüssel</h3>
+ <ul><li>Je Software ein Profil: „Speedrace-Dashboard“ (feste Regeln des Dashboards) oder „andere Software“ (alle Dateien außer Ausnahmen).</li>
+ <li>„Neuen Schlüssel erzeugen“ (Kennwort mind. 12 Zeichen) oder eine vorhandene <span class="mono">.pem</span> übernehmen. Den Ordner <span class="mono">schluessel</span> im Datenordner zusätzlich auf einen USB-Stick sichern.</li>
+ <li>Den öffentlichen Schlüssel dort eintragen, wo geprüft wird. Für „andere Software“ erzeugt „Prompt erzeugen“ einen Text, mit dem eine andere Sitzung die Prüfung einbaut.</li></ul>
+ <h3>2. GitHub</h3>
+ <ul><li>Ein Token (fein granular, Rechte „Contents: Read and write“ für das Repository) eintragen. Es wird unter Windows mit DPAPI verschlüsselt gespeichert.</li></ul>
+ <h3>3. Signieren</h3>
+ <ul><li>Vorher: <span class="mono">VERSION</span> (Form x.y.z) erhöhen, committen und pushen.</li>
+ <li>„Von GitHub laden, signieren und hochladen“: lädt den Stand des Zweigs, signiert, lädt <span class="mono">SIGNATUR.json</span> (beim Dashboard auch <span class="mono">SIGNATUR-BAU.json</span>) in einem Commit hoch und setzt den Tag <span class="mono">v&lt;Version&gt;</span>. Erst danach verteilen.</li>
+ <li>Gibt es den Tag schon, bricht das Werkzeug ab, bevor etwas hochgeladen wird – Tags werden nie verschoben.</li>
+ <li>„Paketliste prüfen / signieren“ (nur Dashboard): signiert die getestete <span class="mono">PAKETE.lock</span> vom Zweig „pakete“ (Python-Pakete und, falls angegeben, die cloudflared-Version).</li>
+ <li>„Ordner signieren“: für einen Ordner auf diesem Rechner (alle Dateien darin, auch nicht eingecheckte).</li></ul>
+ <h3>4. Prüfen</h3>
+ <ul><li>Prüft einen GitHub-Stand oder Ordner gegen die Signatur: zusätzliche, fehlende und veränderte Dateien werden aufgelistet.</li></ul>
+ <h3>5. QNAP</h3>
+ <ul><li>Führt Schritt für Schritt durch Installieren, Neubauen, Zurück zur vorigen Version und Aufräumen auf dem NAS. Jeder Befehl wird vorher angezeigt und erst nach Bestätigung in einem Konsolenfenster ausgeführt; das Ergebnis meldest du zurück.</li>
+ <li>Vor jedem Neubau werden die Bau-Dateien geprüft (Ergebnis 0: frei, 1: nur nach Bestätigung, 2: gesperrt). Ein beiseitegelegter alter Ordner bleibt der Rückweg, bis „Aufräumen“ ihn löscht.</li></ul>
+ <h3>6. Updates des Werkzeugs</h3>
+ <ul><li>Neue Versionen erscheinen oben als „Update“. Sie werden nur eingespielt, wenn die Signatur des Herausgebers gültig ist.</li></ul>
+ <h3>Daten</h3>
+ <p>Profile, Schlüssel, Protokolle: <span class="mono">%APPDATA%\Signier-Werkzeug</span>. Ausführlich: README.md und SICHERHEIT.md im Repository <span class="mono">{{REPO}}</span>.</p>
+ <p class="copy">© 2026 Hans-Christoph Rose. Alle Rechte vorbehalten.</p>
+</body></html>

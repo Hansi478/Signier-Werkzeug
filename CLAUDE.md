@@ -12,7 +12,10 @@
 - Keine echten Namen, Adressen, Hosts oder Pfade in Quelltext, Vorlagen oder Tests – nur
   Platzhalter. Ausnahmen: `WERKZEUG_REPO` (Quelle der eigenen Updates, funktional nötig)
   samt öffentlichem Herausgeber-Schlüssel, und der Copyright-Vermerk des Urhebers im Handbuch
-  der Oberfläche und in der README (vom Benutzer so gewünscht). Private Schlüssel nie ins Repository.
+  (`docs/handbuch_quelle.html`, `Handbuch.pdf`) und in der README (vom Benutzer so gewünscht).
+- **Handbuch nur als PDF:** Ändert sich etwas, das Benutzer betrifft, `docs/handbuch_quelle.html`
+  anpassen und mit `node docs/handbuch_pdf.js` `Handbuch.pdf` neu erzeugen – auch bei jeder
+  neuen Version (der Test prüft die Version im PDF). Private Schlüssel nie ins Repository.
 - Actions in Workflows nur mit vollständigen Commit-SHAs.
 - Tests: `python -m unittest discover -s tests -v`; Selbsttest:
   `python signier_werkzeug.py --selbsttest selbst.txt`.

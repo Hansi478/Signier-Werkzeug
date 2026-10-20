@@ -238,15 +238,51 @@ class TestsUndWorkflowsTests(Basis):
 
 
 class HandbuchTests(unittest.TestCase):
-    def test_info_knopf_handbuch_und_copyright(self):
-        self.assertIn('id="info-knopf"', W.SEITE)
+    """Handbuch nur als PDF: „i“ neben der Version öffnet Handbuch.pdf."""
+
+    def test_info_knopf_oeffnet_pdf(self):
         kopf = W.SEITE.split("</header>")[0]
         self.assertLess(kopf.index("Version __VERSION__"), kopf.index('id="info-knopf"'))   # neben der Version
-        hb = W.SEITE.split('id="hb-dialog"')[1].split('id="kw-dialog"')[0]
-        for teil in ("Handbuch", "Profile &amp; Schlüssel", "Signieren", "Prüfen", "QNAP", "© 2026 Hans-Christoph Rose"):
-            self.assertIn(teil, hb)
-        self.assertIn('id="hb-pdf"', hb)
-        self.assertIn("@media print{body.hb-druck", W.SEITE)
+        self.assertIn('window.open("/handbuch.pdf?t="', W.SEITE)
+        self.assertNotIn("hb-dialog", W.SEITE)
+
+    def test_pdf_passt_zur_version_und_quelle(self):
+        import re
+        with open(W.handbuch_pfad(), "rb") as f:
+            pdf = f.read()
+        self.assertTrue(pdf.startswith(b"%PDF-"))
+        m = re.search(rb"/Title\s*<FEFF([0-9A-Fa-f]+)>", pdf)
+        titel = bytes.fromhex(m.group(1).decode()).decode("utf-16-be")
+        self.assertEqual(titel, f"Handbuch – Signier-Werkzeug {W.VERSION}",
+                         "Handbuch.pdf veraltet: node docs/handbuch_pdf.js ausführen")
+        with open(os.path.join(os.path.dirname(HIER), "docs", "handbuch_quelle.html"), encoding="utf-8") as f:
+            quelle = f.read()
+        for teil in ("Profile &amp; Schlüssel", "Signieren", "Prüfen", "QNAP", "© 2026 Hans-Christoph Rose"):
+            self.assertIn(teil, quelle)
+
+    def test_server_liefert_pdf_nur_mit_token(self):
+        import http.client
+        import threading
+        server = W.Server()
+        threading.Thread(target=server.httpd.serve_forever, daemon=True).start()
+        try:
+            def holen(pfad):
+                c = http.client.HTTPConnection("127.0.0.1", server.port, timeout=10)
+                c.request("GET", pfad, headers={"Host": f"127.0.0.1:{server.port}"})
+                r = c.getresponse()
+                return r.status, r.getheader("Content-Type"), r.read()
+            status, typ, daten = holen("/handbuch.pdf?t=" + server.token)
+            self.assertEqual((status, typ), (200, "application/pdf"))
+            self.assertTrue(daten.startswith(b"%PDF-"))
+            self.assertEqual(holen("/handbuch.pdf")[0], 403)
+            self.assertEqual(holen("/anderes.pdf?t=" + server.token)[0], 403)
+        finally:
+            server.httpd.shutdown()
+            server.httpd.server_close()
+
+    def test_exe_enthaelt_handbuch(self):
+        with open(os.path.join(os.path.dirname(HIER), ".github", "workflows", "bauen.yml"), encoding="utf-8") as f:
+            self.assertIn('--add-data "Handbuch.pdf:."', f.read())
 
 
 class HochladenMeldungTests(unittest.TestCase):
