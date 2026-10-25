@@ -49,7 +49,7 @@ import einbindung_prompt
 import qnap_begleiter as Q
 
 PROGRAMM = "Signier-Werkzeug"
-VERSION = "1.2.9"
+VERSION = "1.3.0"
 FORMAT = "sr-signatur-1"
 SIGNATUR_DATEI = "SIGNATUR.json"
 BINAER = (".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".otf")
