@@ -18,6 +18,7 @@ Speicher - nur für die laufende Sitzung im Arbeitsspeicher (siehe SICHERHEIT.md
 """
 import base64
 import contextlib
+import datetime
 import fnmatch
 import hashlib
 import html
@@ -1551,6 +1552,46 @@ def _cloudflared_unterschied(alt, neu):
     return []
 
 
+_DEBIAN_ZEILE = re.compile(r"^# debian:.*$", re.M)
+# genau wie app.py, tools/debian_einspielen.py und tools/signieren.py im Dashboard
+_DEBIAN_RE = re.compile(r"^# debian: ([a-z][a-z0-9-]{1,30}) (\d{8}T\d{6}Z)$")
+
+
+def pakete_debian(text):
+    """Signierter Stand der Debian-Systempakete „# debian: <Codename> <JJJJMMTTThhmmssZ>“
+    -> {"codename", "zeitpunkt"} oder None (keine Zeile). Eine falsche Zeile ist
+    ein Fehler (nicht signieren)."""
+    zeilen = _DEBIAN_ZEILE.findall(text.replace("\r\n", "\n"))
+    if not zeilen:
+        return None
+    m = _DEBIAN_RE.fullmatch(zeilen[0]) if len(zeilen) == 1 else None
+    try:
+        if m:
+            datetime.datetime.strptime(m.group(2), "%Y%m%dT%H%M%SZ")   # gültiges Datum
+    except ValueError:
+        m = None
+    if not m:
+        raise ValueError(f"{PAKETE_DATEI}: die Debian-Zeile hat nicht das Format „# debian: <Codename> "
+                         "<JJJJMMTTThhmmssZ>“ (Codename klein, gültiger Zeitpunkt in UTC, höchstens eine Zeile) - "
+                         "nicht signiert.")
+    return {"codename": m.group(1), "zeitpunkt": m.group(2)}
+
+
+def _debian_text(alt, neu):
+    """z. B. „Debian trixie: Stand 24.10.2026 (bisher 26.09.2026)“ oder „…(bisher keiner)“."""
+    n = pakete_debian(neu)
+    if not n:
+        return ""
+    try:
+        a = pakete_debian(alt) if alt else None
+    except ValueError:
+        a = None
+    datum = lambda z: f"{z[6:8]}.{z[4:6]}.{z[0:4]}"
+    bisher = (f"bisher {datum(a['zeitpunkt'])}" + (f", {a['codename']}" if a["codename"] != n["codename"] else "")
+              if a else "bisher keiner")
+    return f"Debian {n['codename']}: Stand {datum(n['zeitpunkt'])} ({bisher})"
+
+
 def _zuletzt_signierte_paketliste(repo, token, stand, oeffentlich, tiefe=10):
     """PAKETE.lock, die auf dem Zweig „pakete“ zuletzt gültig signiert war (vor
     dem Stand `stand`), für die Anzeige „alt → neu“ - oder None."""
@@ -1617,6 +1658,7 @@ def pakete_stand(pr, token):
         raise ValueError(f"Keine Paketliste zum Signieren ({PAKETE_DATEI} fehlt auf dem Zweig „{PAKETE_ZWEIG}“).")
     version = pakete_version(lock)
     cloudflared = pakete_cloudflared(lock.decode("utf-8"))   # Format prüfen, bevor etwas angezeigt wird
+    debian = pakete_debian(lock.decode("utf-8"))
     summe = pakete_pruefsumme(lock)
     # die Liste muss zu einer signierten Programmversion gehören
     tag_commit = _tag_commit(repo, token, "v" + version)
@@ -1638,11 +1680,14 @@ def pakete_stand(pr, token):
     if alt is not None and sig["dateien"].get("requirements.lock") != pakete_pruefsumme(alt):
         raise ValueError(f"requirements.lock im Tag v{version} passt nicht zur Signatur - abgebrochen.")
     vorhanden = _blob(repo, token, baum, PAKETE_SIGNATUR_DATEI, MAX_SIGNATUR_BYTES)
+    # Vergleich für cloudflared und Debian: die Liste, die auf dem Zweig zuletzt gültig signiert war
+    vorige = _zuletzt_signierte_paketliste(repo, token, stand, pr.get("oeffentlich") or "") \
+        if cloudflared or debian else None
     return {"repo": repo, "stand": stand, "baum": baum, "version": version, "summe": summe,
             "unterschiede": pakete_unterschiede(alt.decode("utf-8", "replace") if alt else "", lock.decode("utf-8"))
-            + (_cloudflared_unterschied(_zuletzt_signierte_paketliste(repo, token, stand, pr.get("oeffentlich") or ""),
-                                       lock.decode("utf-8")) if cloudflared else []),
+            + (_cloudflared_unterschied(vorige, lock.decode("utf-8")) if cloudflared else []),
             "cloudflared": cloudflared["version"] if cloudflared else "",
+            "debian": _debian_text(vorige, lock.decode("utf-8")) if debian else "",
             "bereits": bool(vorhanden) and pakete_signatur_gueltig(vorhanden, pr.get("oeffentlich") or "", summe, version)}
 
 
@@ -2450,7 +2495,7 @@ def aktion(name, p):
         if not token:
             raise ValueError("Dazu wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
         st = pakete_stand(pr, token)
-        return {k: st[k] for k in ("version", "summe", "unterschiede", "bereits", "cloudflared")}
+        return {k: st[k] for k in ("version", "summe", "unterschiede", "bereits", "cloudflared", "debian")}
     if name == "pakete_signieren":
         if not token:
             raise ValueError("Dazu wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
@@ -2979,6 +3024,7 @@ $("s-pakete-pruefen").onclick = e => mit("s-status", e.target, "Lade die Paketli
   paketeSumme = d.bereits ? "" : d.summe;
   $("s-pakete-info").innerHTML = `Programmversion <b>${esc(d.version)}</b>, Prüfsumme <span class="mono">${esc(d.summe)}</span>`
     + (d.cloudflared ? `, cloudflared <b>${esc(d.cloudflared)}</b>` : "") + ". "
+    + (d.debian ? `<br>${esc(d.debian)}. ` : "")
     + (d.unterschiede.length ? "Änderungen gegenüber v" + esc(d.version) + ":<ul>" + d.unterschiede.map(u => `<li class="mono">${esc(u)}</li>`).join("") + "</ul>"
        : "Keine Änderungen gegenüber v" + esc(d.version) + ". ");
   $("s-pakete-los-zeile").classList.toggle("versteckt", !!d.bereits);

@@ -96,7 +96,9 @@ Enthält die Liste die Zeile
 `# cloudflared: <Version> amd64=<sha256> arm64=<sha256> armhf=<sha256> windows-amd64=<sha256>`,
 ist sie mitsigniert (die Signatur deckt die ganze Datei ab); das Werkzeug prüft ihr Format streng
 (wie das Dashboard) und zeigt die Änderung gegenüber der Liste, die auf dem Zweig zuletzt gültig
-signiert war (z. B. „cloudflared 2026.9.1 → 2026.10.0“, sonst „(bisher keine)“).
+signiert war (z. B. „cloudflared 2026.9.1 → 2026.10.0“, sonst „(bisher keine)“). Ebenso die Zeile
+`# debian: <Codename> <JJJJMMTTThhmmssZ>` (getesteter Stand der Debian-Systempakete), angezeigt als
+„Debian trixie: Stand 24.10.2026 (bisher 26.09.2026)“. Eine falsche Zeile wird nicht signiert.
 
 ## QNAP (Dashboard auf dem NAS installieren oder neu bauen)
 

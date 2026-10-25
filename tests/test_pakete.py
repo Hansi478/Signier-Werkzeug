@@ -86,6 +86,27 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(W._cloudflared_unterschied(neu, neu), [])
         self.assertIn("Prüfsummen geändert", W._cloudflared_unterschied(neu.replace("1" * 64, "9" * 64), neu)[0])
 
+    def test_debian_zeile(self):
+        # Testbeispiel der Übergabe: Zeile direkt nach „# Programmversion: 9.9.9 …“
+        teile = LOCK.decode().split("\n")
+        mit = "\n".join(teile[:2] + ["# debian: trixie 20301024T000000Z"] + teile[2:])
+        self.assertEqual(W.pakete_debian(mit), {"codename": "trixie", "zeitpunkt": "20301024T000000Z"})
+        self.assertEqual(W.pakete_version(mit.encode()), "9.9.9")
+        self.assertTrue(W.pakete_signatur_bauen(test_schluessel(), "9.9.9", W.pakete_pruefsumme(mit.encode()), "2030-01-01"))
+        self.assertIsNone(W.pakete_debian(LOCK.decode()))   # ohne Zeile gültig
+        for falsch in ("# debian: trixie 2030", "# debian: Trixie 20301024T000000Z",
+                       "# debian: trixie 20301324T000000Z",                     # Monat 13
+                       "# debian: trixie 20301024T000000Z ",                    # Leerzeichen am Ende
+                       "# debian:  trixie 20301024T000000Z",
+                       "# debian: trixie 20301024T000000Z\n# debian: trixie 20301025T000000Z"):
+            with self.subTest(falsch=falsch):
+                self.assertRaisesRegex(ValueError, "Debian-Zeile", W.pakete_debian, falsch)
+        neu = "# debian: trixie 20261024T000000Z\n"
+        self.assertEqual(W._debian_text(None, neu), "Debian trixie: Stand 24.10.2026 (bisher keiner)")
+        self.assertEqual(W._debian_text("# debian: trixie 20260926T000000Z\n", neu),
+                         "Debian trixie: Stand 24.10.2026 (bisher 26.09.2026)")
+        self.assertEqual(W._debian_text("", "x\n"), "")
+
     def test_unterschiede(self):
         alt = "pypdf==6.20.1 \\\n    --hash=sha256:x\nalt_paket==1.0\nFlask==3.0.0\n"
         neu = "pypdf==6.21.1 \\\n    --hash=sha256:y\nflask==3.0.0\nneu-paket[extra]==2.0 ; python_version >= '3'\n"
@@ -176,6 +197,19 @@ class AblaufTests(unittest.TestCase):
         self.assertIn("cloudflared 2026.9.1 → 2026.10.0", d["unterschiede"])
         self.dateien["pakete"][W.PAKETE_DATEI] = LOCK + b"# cloudflared: kaputt\n"
         self.assertRaisesRegex(ValueError, "cloudflared-Zeile", self.lauf, "pakete_pruefen")
+
+    def test_debian_im_ablauf(self):
+        zeile = b"# debian: trixie 20261024T000000Z\n"
+        alt = LOCK + b"# debian: trixie 20260926T000000Z\n"
+        sig = W.pakete_signatur_bauen(self.privat, "9.9.9", W.pakete_pruefsumme(alt), "2030-01-01")
+        self.dateien["vorher"] = {W.PAKETE_DATEI: alt, W.PAKETE_SIGNATUR_DATEI: sig.encode()}
+        self.dateien["pakete"][W.PAKETE_DATEI] = LOCK + zeile
+        d, _ = self.lauf("pakete_pruefen")
+        self.assertEqual(d["debian"], "Debian trixie: Stand 24.10.2026 (bisher 26.09.2026)")
+        d, hoch = self.lauf("pakete_signieren", kennwort=KENNWORT, summe=d["summe"])   # nur Debian geändert: signieren
+        hoch.assert_called_once()
+        self.dateien["pakete"][W.PAKETE_DATEI] = LOCK + b"# debian: Trixie 20261024T000000Z\n"
+        self.assertRaisesRegex(ValueError, "Debian-Zeile", self.lauf, "pakete_pruefen")
 
     def test_abbrueche(self):
         # andere Liste als angezeigt

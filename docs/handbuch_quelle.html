@@ -188,7 +188,8 @@ th{background:#f1f5f9}tr{break-inside:avoid}
 <!-- ===================== 6 ===================== -->
 <section class="kapitel">
  <h2>6. Paketliste signieren (Speedrace-Dashboard)</h2>
- <p>Neuere Python-Pakete (und, falls angegeben, cloudflared) sollen ohne neue Programmversion zu den Dashboards kommen –
+ <p>Neuere Python-Pakete – und, falls angegeben, cloudflared und ein getesteter Stand der Debian-Systempakete
+(OpenSSL, LibreOffice …) – sollen ohne neue Programmversion zu den Dashboards kommen –
  aber nur getestet und von dir signiert.</p>
  <figure>
   <svg viewBox="0 0 720 130" width="720" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" font-size="12">
@@ -202,7 +203,7 @@ th{background:#f1f5f9}tr{break-inside:avoid}
   <figcaption>Abbildung 11: Weg einer Paketliste.</figcaption>
  </figure>
  <ol>
-  <li>Reiter <b>Signieren</b>, Speedrace-Profil wählen → <b>„Paketliste prüfen“</b> (ohne Kennwort). Angezeigt werden Programmversion, Prüfsumme, cloudflared-Version und die geänderten Pakete, z. B. „pypdf 6.20.1 → 6.21.1“.</li>
+  <li>Reiter <b>Signieren</b>, Speedrace-Profil wählen → <b>„Paketliste prüfen“</b> (ohne Kennwort). Angezeigt werden Programmversion, Prüfsumme, cloudflared-Version, der Debian-Stand (z. B. „Debian trixie: Stand 24.10.2026 (bisher 26.09.2026)“) und die geänderten Pakete, z. B. „pypdf 6.20.1 → 6.21.1“. Ändert sich nur cloudflared oder der Debian-Stand, ist die Liste trotzdem zu signieren.</li>
   <li>Änderungen ansehen. Passt alles: <b>„Paketliste signieren und hochladen“</b> → Kennwort.</li>
   <li><span class="mono">SIGNATUR-PAKETE.json</span> landet in einem Commit auf dem Zweig „pakete“. Nichts an <span class="mono">main</span>, kein Tag.</li>
  </ol>

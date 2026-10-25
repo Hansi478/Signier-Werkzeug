@@ -73,7 +73,7 @@ const warte = ms => new Promise(ok => setTimeout(ok, ms));
   await seite.selectOption("#s-profil", sr); await warte(200);
   await seite.evaluate(() => {   // Beispiel einer geprüften Paketliste (ohne GitHub)
     document.getElementById("s-pakete-info").innerHTML = 'Programmversion <b>1.8.12</b>, Prüfsumme <span class="mono">3f7a…c21e</span>, '
-      + 'cloudflared <b>2026.10.0</b>. Änderungen gegenüber v1.8.12:<ul><li class="mono">pypdf 6.20.1 → 6.21.1</li>'
+      + 'cloudflared <b>2026.10.0</b>. <br>Debian trixie: Stand 24.10.2026 (bisher 26.09.2026). Änderungen gegenüber v1.8.12:<ul><li class="mono">pypdf 6.20.1 → 6.21.1</li>'
       + '<li class="mono">cloudflared 2026.9.1 → 2026.10.0</li></ul>';
     document.getElementById("s-pakete-los-zeile").classList.remove("versteckt");
   });

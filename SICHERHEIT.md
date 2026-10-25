@@ -117,7 +117,12 @@ Format `sr-pakete-signatur-1`, genau wie im Dashboard (`tools/signieren.py`: `pa
   ist Teil der signierten Datei. Geprüft wie im Dashboard: Regex
   `^# cloudflared: (\d{4}\.\d{1,2}\.\d{1,3})((?: [a-z0-9-]+=[0-9a-f]{64})+)$`, genau diese vier
   Architekturen je einmal (Reihenfolge egal), höchstens eine Zeile. Zum Vergleich dient die
-  Liste, die auf dem Zweig zuletzt gültig signiert war. Weicht sie vom Format ab, signiert das
+  Liste, die auf dem Zweig zuletzt gültig signiert war.
+- Debian: Die Zeile `# debian: <Codename> <Zeitpunkt>` (Regex
+  `^# debian: ([a-z][a-z0-9-]{1,30}) (\d{8}T\d{6}Z)$`, gültiges Datum in UTC, höchstens eine
+  Zeile) ist ebenfalls Teil der signierten Datei; das Dashboard spielt genau diesen Stand aus
+  snapshot.debian.org ein. Falsches Format: nicht signiert. `DEBIAN-PAKETE.txt` neben der Liste
+  ist unsigniert und dient nur zur Kontrolle. Weicht sie vom Format ab, signiert das
   Werkzeug nicht - eine unbrauchbare Angabe würde sonst mitsigniert.
 - Signiert wird genau die angezeigte Liste: Hat sie sich seit „Prüfen“ geändert, bricht das
   Werkzeug ab. Hochgeladen wird in einem Commit auf den Zweig `pakete` (nur vorspulen).
