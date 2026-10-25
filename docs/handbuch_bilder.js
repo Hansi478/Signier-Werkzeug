@@ -33,7 +33,13 @@ const warte = ms => new Promise(ok => setTimeout(ok, ms));
   const seite = await browser.newPage({viewport: {width: 1100, height: 900}, deviceScaleFactor: 1.5});
   seite.on("dialog", d => d.accept());
   await seite.goto(url); await warte(800);
+  // Versionsnummer im Kopf als Platzhalter: sonst zeigte das Handbuch nach der nächsten Version eine alte Nummer
+  const versionPlatzhalter = () => seite.evaluate(() => {
+    const kopf = document.querySelector("header .rechts");
+    for (const n of kopf ? kopf.childNodes : []) if (n.nodeType === 3) n.textContent = n.textContent.replace(/Version \d+\.\d+\.\d+/, "Version x.y.z");
+  });
   const foto = async (name, ziel) => {
+    await versionPlatzhalter();
     await seite.evaluate(() => { const d = document.getElementById("datenpfad"); if (d) d.textContent = ""; });
     await seite.evaluate(t => { const d = document.getElementById("datenpfad"); if (d) d.textContent = t; }, DATEN);
     const el = ziel ? seite.locator(ziel).first() : seite;
@@ -49,7 +55,7 @@ const warte = ms => new Promise(ok => setTimeout(ok, ms));
   z = await api("profil_speichern", {name: "Beispiel-Software", regel: "alle", repo: "Besitzer/Beispiel", ausschluss: "logs/*\n*.log"});
   const bs = z.profile[z.profile.length - 1].id;
   await api("schluessel_neu", {id: bs, kennwort: KW});
-  await seite.reload(); await warte(800);
+  await seite.reload(); await warte(800); await versionPlatzhalter();
   await seite.screenshot({path: path.join(bilder, "01_start.png"), clip: {x: 0, y: 0, width: 1100, height: 450}});
 
   await reiter("profile");
@@ -73,8 +79,8 @@ const warte = ms => new Promise(ok => setTimeout(ok, ms));
   await seite.selectOption("#s-profil", sr); await warte(200);
   await seite.evaluate(() => {   // Beispiel einer geprüften Paketliste (ohne GitHub)
     document.getElementById("s-pakete-info").innerHTML = 'Programmversion <b>1.8.12</b>, Prüfsumme <span class="mono">3f7a…c21e</span>, '
-      + 'cloudflared <b>2026.10.0</b>. <br>Debian trixie: Stand 24.10.2026 (bisher 26.09.2026). Änderungen gegenüber v1.8.12:<ul><li class="mono">pypdf 6.20.1 → 6.21.1</li>'
-      + '<li class="mono">cloudflared 2026.9.1 → 2026.10.0</li></ul>';
+      + 'cloudflared <b>2026.10.0</b>. <br>Debian trixie: Stand 24.10.2026 (bisher 26.09.2026). Python-Pakete gegenüber v1.8.12:<ul><li class="mono">pypdf 6.20.1 → 6.21.1</li></ul>'
+      + 'Gegenüber der zuletzt signierten Liste:<ul><li class="mono">cloudflared 2026.9.1 → 2026.10.0</li></ul>';
     document.getElementById("s-pakete-los-zeile").classList.remove("versteckt");
   });
   await foto("08_signieren", "#r-signieren .karte");

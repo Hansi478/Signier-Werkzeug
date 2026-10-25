@@ -91,7 +91,10 @@ Paketversionen gegenüber `requirements.lock` im Tag `v<Version>`. **„Paketlis
 hochladen“** signiert genau diese Liste (Format `sr-pakete-signatur-1`, gleicher Schlüssel) und
 lädt `SIGNATUR-PAKETE.json` in einem Commit auf den Zweig `pakete`. Nichts an main, kein Tag.
 Abgebrochen wird, wenn es den Tag `v<Version>` nicht gibt oder er keine gültige Signatur dieses
-Profils trägt; eine schon gültig signierte Liste wird nicht noch einmal hochgeladen.
+Profils trägt; eine schon gültig signierte Liste wird nicht noch einmal hochgeladen. Erlaubt
+sind nur Pakete `name==version` mit Prüfsummen (`--hash=sha256:`) – pip-Optionen wie
+`--index-url` oder `-r` und Direkt-URLs brechen ab, weil die Anzeige sie nicht zeigen würde.
+Geänderte Prüfsummen bei gleicher Version werden angezeigt.
 Enthält die Liste die Zeile
 `# cloudflared: <Version> amd64=<sha256> arm64=<sha256> armhf=<sha256> windows-amd64=<sha256>`,
 ist sie mitsigniert (die Signatur deckt die ganze Datei ab); das Werkzeug prüft ihr Format streng
@@ -112,7 +115,7 @@ legt keine SSH-Schlüssel an. „Nur anleiten“ zeigt alle Befehle zum Lesen un
 
 Einmalig das QNAP-Profil ausfüllen: Host bzw. IP, Port, Benutzer, Programmordner (absoluter
 Pfad, ohne Leerzeichen), optional die Dashboard-Adresse, und das Signier-Profil, aus dessen
-Repository die Versionen kommen.
+Repository die Versionen kommen (nur Profile „Speedrace-Dashboard“).
 
 Abläufe:
 
@@ -122,22 +125,29 @@ Abläufe:
   (mit Prüfsummen-Kontrolle) → Bau-Dateien prüfen → `build --no-cache` → `up -d` → Kontrolle → optional
   aufräumen (alten Ordner, ZIP, alte Images).
 - **Nur neu bauen:** gleiche Version, neues Image (`build --no-cache`, `up -d`).
+- **Zur vorigen Version zurück:** den kaputten Ordner wegstellen, den beiseitegelegten Ordner
+  zurückholen, Bau-Dateien prüfen, neu bauen (nur nötig, wenn die Installation schon ein neues
+  Image gebaut hat – sonst überspringbar, z. B. ohne Internet) und starten.
+- **Aufräumen:** beiseitegelegten Ordner endgültig löschen, ZIP und alte Images entfernen; am
+  Ende zeigt es den Elternordner – übrige `….kaputt-…`/`….entpacken-…`-Ordner von Hand löschen.
 
 Vor jedem Neubau: „Bau-Dateien prüfen“ (`app.py --bau-pruefen`, ab Dashboard 1.8.8). Vorher
 sieht das Werkzeug per `grep` nach, ob `app.py` den Schalter kennt – ein älteres Programm würde
 sonst das Dashboard starten. Ergebnis 0: Neubau frei; 1 (Hinweis): nur nach Bestätigung;
 2 (Fehler): Neubau gesperrt – Bau-Dateien aus der signierten Version neu holen.
-- **Zur vorigen Version zurück:** den kaputten Ordner wegstellen, den beiseitegelegten Ordner
-  zurückholen, Bau-Dateien prüfen, neu bauen (nur nötig, wenn die Installation schon ein neues
-  Image gebaut hat – sonst überspringbar, z. B. ohne Internet) und starten.
-- **Aufräumen:** beiseitegelegten Ordner endgültig löschen, ZIP und alte Images entfernen.
+
+Eigene `docker-compose.yml`: Die neue Version bringt die signierte Datei mit. Hast du deine auf
+der QNAP angepasst (Port, `SR_UPDATE_SCHLUESSEL`, `:ro` …), zeigt „docker-compose.yml vergleichen“
+die Unterschiede, und „Eigene docker-compose.yml übernehmen“ holt deine Fassung aus dem
+beiseitegelegten Ordner (danach meldet die Bau-Prüfung bewusst Ergebnis 1).
 
 Im Elternordner des Programmordners fasst das Werkzeug nur den Programmordner (umbenennen),
 die selbst angelegten `….alt-…`/`….kaputt-…`-Ordner, den Zwischenordner `….entpacken-…` und die
 selbst hochgeladenen ZIPs (`<Programmordner>.signier-JJJJMMTT-hhmm.zip`) an – den Daten-Ordner
 daneben nie. In die ZIP kommen nur signierte Dateien (dazu die signierten Bau-Dateien und die
 Signaturdateien); alles andere aus dem Tag-Commit zeigt das Werkzeug als „nicht übernommen“.
-Ausnahme: Versionen vor 1.8.8 haben keine Bau-Signatur – deren Bau-Dateien (Dockerfile, tools/ …)
+Weicht im Tag eine signierte Bau-Datei ab (auch `docker-compose.yml`) oder fehlt eine, wird nicht
+installiert. Ausnahme: Versionen vor 1.8.8 haben keine Bau-Signatur – deren Bau-Dateien (Dockerfile, tools/ …)
 kommen unsigniert mit und werden so angezeigt, sonst ließe sich nicht bauen. Protokoll (Zeit, Schritt, Befehl, Rückmeldung; keine
 Passwörter): `%APPDATA%\Signier-Werkzeug\qnap-protokoll.txt`. Details: SICHERHEIT.md,
 Abschnitt 7.

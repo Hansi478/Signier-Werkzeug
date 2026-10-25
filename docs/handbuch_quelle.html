@@ -203,11 +203,11 @@ th{background:#f1f5f9}tr{break-inside:avoid}
   <figcaption>Abbildung 11: Weg einer Paketliste.</figcaption>
  </figure>
  <ol>
-  <li>Reiter <b>Signieren</b>, Speedrace-Profil wählen → <b>„Paketliste prüfen“</b> (ohne Kennwort). Angezeigt werden Programmversion, Prüfsumme, cloudflared-Version, der Debian-Stand (z. B. „Debian trixie: Stand 24.10.2026 (bisher 26.09.2026)“) und die geänderten Pakete, z. B. „pypdf 6.20.1 → 6.21.1“. Ändert sich nur cloudflared oder der Debian-Stand, ist die Liste trotzdem zu signieren.</li>
+  <li>Reiter <b>Signieren</b>, Speedrace-Profil wählen → <b>„Paketliste prüfen“</b> (ohne Kennwort). Angezeigt werden Programmversion, Prüfsumme, cloudflared-Version, der Debian-Stand (z. B. „Debian trixie: Stand 24.10.2026 (bisher 26.09.2026)“) die geänderten Pakete gegenüber dem Tag (z. B. „pypdf 6.20.1 → 6.21.1“, auch „Prüfsummen geändert“ bei gleicher Version) und, getrennt davon, was sich gegenüber der zuletzt signierten Liste geändert hat (cloudflared, Wegfall einer Zeile). „bisher unbekannt“ heißt: die vorige Liste ließ sich nicht ermitteln – dann selbst nachsehen. Ändert sich nur cloudflared oder der Debian-Stand, ist die Liste trotzdem zu signieren.</li>
   <li>Änderungen ansehen. Passt alles: <b>„Paketliste signieren und hochladen“</b> → Kennwort.</li>
   <li><span class="mono">SIGNATUR-PAKETE.json</span> landet in einem Commit auf dem Zweig „pakete“. Nichts an <span class="mono">main</span>, kein Tag.</li>
  </ol>
- <div class="kasten">Das Werkzeug signiert nur, wenn die Liste zu einer gültig signierten Programmversion gehört (Tag <span class="mono">v&lt;Version&gt;</span> mit gültiger <span class="mono">SIGNATUR.json</span>), und genau die Liste, die du gesehen hast. Ist sie schon gültig signiert, meldet es „bereits signiert“.</div>
+ <div class="kasten">Das Werkzeug signiert nur, wenn die Liste zu einer gültig signierten Programmversion gehört (Tag <span class="mono">v&lt;Version&gt;</span> mit gültiger <span class="mono">SIGNATUR.json</span>), und genau die Liste, die du gesehen hast. Ist sie schon gültig signiert, meldet es „bereits signiert“. Enthält die Liste etwas anderes als Pakete mit Prüfsummen (z. B. <span class="mono">--index-url</span>, <span class="mono">-r</span> oder einen Direkt-Link), signiert es nicht – pip würde das übernehmen, ohne dass die Anzeige es zeigt.</div>
 </section>
 
 <!-- ===================== 7 ===================== -->
@@ -217,7 +217,7 @@ th{background:#f1f5f9}tr{break-inside:avoid}
  „Ordner prüfen“. Das Werkzeug rechnet jede Datei nach.</p>
  <figure><img src="bilder/11_pruefen_ok.png"><figcaption>Abbildung 12: Alles in Ordnung.</figcaption></figure>
  <figure><img src="bilder/12_pruefen_fehler.png"><figcaption>Abbildung 13: Abweichungen – jede betroffene Datei mit Grund (verändert, zusätzlich, fehlt).</figcaption></figure>
- <p>Beim Speedrace-Dashboard werden zusätzlich die Bau-Dateien geprüft; eine angepasste <span class="mono">docker-compose.yml</span> ist nur ein Hinweis.</p>
+ <p>Beim Speedrace-Dashboard werden zusätzlich die Bau-Dateien geprüft; eine angepasste <span class="mono">docker-compose.yml</span> ist bei einem Ordner nur ein Hinweis (sie wird vor Ort angepasst). Beim Stand auf GitHub heißt dieselbe Abweichung „nach dem Signieren geändert“.</p>
 </section>
 
 <!-- ===================== 8 ===================== -->
@@ -235,10 +235,10 @@ th{background:#f1f5f9}tr{break-inside:avoid}
  <h3>Abläufe</h3>
  <table>
   <tr><th style="width:28%">Ablauf</th><th>Wofür</th></tr>
-  <tr><td>Neue Version installieren</td><td>Signierte Version (Tag) laden und prüfen → hochladen → Container anhalten → alten Ordner beiseitelegen → entpacken → Bau-Dateien prüfen → neu bauen → starten → kontrollieren → optional aufräumen.</td></tr>
+  <tr><td>Neue Version installieren</td><td>Signierte Version (Tag) laden und prüfen → hochladen → Container anhalten → alten Ordner beiseitelegen → entpacken → eigene <span class="mono">docker-compose.yml</span> vergleichen (und ggf. übernehmen) → Bau-Dateien prüfen → neu bauen → starten → kontrollieren → optional aufräumen.</td></tr>
   <tr><td>Nur neu bauen</td><td>Gleiche Version, neues Image – z. B. für aktuelle Systempakete oder ein neues cloudflared.</td></tr>
   <tr><td>Zur vorigen Version zurück</td><td>Den beiseitegelegten Ordner zurückholen, prüfen, (falls nötig) neu bauen und starten.</td></tr>
-  <tr><td>Aufräumen</td><td>Beiseitegelegten Ordner endgültig löschen, hochgeladene ZIP und alte Images entfernen – erst, wenn die neue Version läuft.</td></tr>
+  <tr><td>Aufräumen</td><td>Beiseitegelegten Ordner endgültig löschen, hochgeladene ZIP und alte Images entfernen – erst, wenn die neue Version läuft. Am Ende zeigt es den Elternordner: übrige <span class="mono">….kaputt-…</span>/<span class="mono">….entpacken-…</span>-Ordner von Hand löschen.</td></tr>
  </table>
  <figure>
   <svg viewBox="0 0 720 230" width="720" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" font-size="11.5">
@@ -269,6 +269,15 @@ th{background:#f1f5f9}tr{break-inside:avoid}
  </ol>
  <figure><img src="bilder/14_qnap_ablauf.png"><figcaption>Abbildung 16: Erster Schritt – nur lesen und bestätigen.</figcaption></figure>
  <figure><img src="bilder/15_qnap_schritt.png"><figcaption>Abbildung 17: Ein Schritt mit Befehl.</figcaption></figure>
+ <h3>Eigene docker-compose.yml</h3>
+ <p>Die neue Version bringt die signierte <span class="mono">docker-compose.yml</span> mit. Hast du deine auf der QNAP angepasst
+ (Port, <span class="mono">SR_UPDATE_SCHLUESSEL</span>, <span class="mono">SR_UID</span>/<span class="mono">SR_GID</span>,
+ <span class="mono">.:/app:ro</span>), wären diese Änderungen sonst weg. <b>„docker-compose.yml vergleichen“</b> zeigt die
+ Unterschiede (Zeilen mit „-“: signierte Fassung, „+“: deine). Weichen nur deine eigenen Anpassungen ab:
+ <b>„Eigene docker-compose.yml übernehmen“</b> – die Bau-Prüfung meldet danach bewusst Ergebnis 1. Bringt die neue Version
+ selbst Änderungen an der Datei, überspringen und deine Anpassungen nachher von Hand eintragen.</p>
+ <p>Im Tag selbst ist jede Abweichung einer signierten Bau-Datei – auch der <span class="mono">docker-compose.yml</span> –
+ ein Grund, nicht zu installieren: Dort gibt es nichts „vor Ort Angepasstes“.</p>
  <h3>Bau-Prüfung vor jedem Neubau</h3>
  <figure>
   <svg viewBox="0 0 700 92" width="700" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" font-size="12">
@@ -318,6 +327,8 @@ th{background:#f1f5f9}tr{break-inside:avoid}
   <tr><th style="width:42%">Meldung (sinngemäß)</th><th>Bedeutung und Abhilfe</th></tr>
   <tr><td>VERSION fehlt oder hat nicht die Form x.y.z / beginnt mit einem BOM</td><td><span class="mono">VERSION</span> korrigieren (z. B. <span class="mono">1.4.0</span>, UTF-8 ohne BOM), committen, erneut signieren.</td></tr>
   <tr><td>Tag v… gibt es schon</td><td>Diese Version ist schon vergeben. Neue Versionsnummer vergeben – Tags werden nie verschoben.</td></tr>
+  <tr><td>Bau-Dateien im Tag passen nicht zu SIGNATUR-BAU.json – nach dem Signieren geändert</td><td>Nicht installieren. Jemand hat nach dem Signieren etwas geändert und den Tag verschoben – klären, Version neu signieren.</td></tr>
+  <tr><td>PAKETE.lock, Zeile …: erlaubt sind nur „paket==version“ mit Prüfsummen</td><td>Nicht signieren. Die Liste enthält pip-Optionen oder Direkt-Links – Herkunft der Liste klären.</td></tr>
   <tr><td>Auf GitHub hat sich zwischendurch etwas geändert</td><td>Jemand hat gepusht. Einfach noch einmal signieren.</td></tr>
   <tr><td>Unklar, ob die Signatur auf GitHub angekommen ist</td><td>Netzproblem. Später erneut signieren (lädt nichts doppelt hoch, setzt nur den Tag). Bis dahin nicht verteilen.</td></tr>
   <tr><td>Kompilierte Python-Dateien gefunden</td><td><span class="mono">__pycache__</span>-Ordner und <span class="mono">*.pyc</span> löschen.</td></tr>

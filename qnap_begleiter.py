@@ -265,6 +265,32 @@ def _b_entpacken(pr, lauf, z, roh):
             f"{q(o['name'])} && rmdir -- {q(tmp)} && ls -la {q(o['name'])}; fi")
 
 
+def _alt_oder_platzhalter(o, z, roh):
+    alt = z.get("alt") if not roh else (z.get("alt") or o["name"] + ".alt-JJJJMMTT-hhmm")
+    return alt if roh else _alt_pruefen(o, alt)
+
+
+def _b_compose_vergleich(pr, lauf, z, roh):
+    # nur lesen: die signierte Fassung (neu) gegen die bisherige auf der QNAP (im …alt-Ordner)
+    o = orte(pr)
+    alt = _alt_oder_platzhalter(o, z, roh)
+    return (f"cd {q(o['e'])} && if diff -u {q(o['name'] + '/docker-compose.yml')} {q(alt + '/docker-compose.yml')}; "
+            "then echo GLEICH - naechsten Schritt ueberspringen; else echo UNTERSCHIEDE - siehe oben; fi")
+
+
+def _b_compose_uebernehmen(pr, lauf, z, roh):
+    o = orte(pr)
+    alt = _alt_oder_platzhalter(o, z, roh)
+    return (f"cd {q(o['e'])} && if [ -d {q(o['name'])} ] && [ -f {q(alt + '/docker-compose.yml')} ]; then "
+            f"cp -p -- {q(alt + '/docker-compose.yml')} {q(o['name'] + '/docker-compose.yml')} && "
+            f"ls -la {q(o['name'] + '/docker-compose.yml')}; "
+            f"else {_abbruch('Programmordner oder bisherige docker-compose.yml fehlt - nichts kopiert')}; fi")
+
+
+def _b_uebersicht(pr, lauf, z, roh):
+    return f"ls -la {q(orte(pr)['e'])}"
+
+
 def _b_bau_vorpruefung(pr, lauf, z, roh):
     return f"grep -c -- '--bau-pruefen' {q(orte(pr)['p'] + '/app.py')}"
 
@@ -420,8 +446,10 @@ SCHRITTE = {
         "titel": "Version laden und prüfen", "art": "lokal",
         "erklaerung": ["Das Werkzeug lädt die gewählte Version (Tag v…) von GitHub, prüft die Signatur mit deinem öffentlichen Schlüssel "
                        "und baut daraus eine saubere ZIP mit genau einem Ordner (Name des Programmordners). Noch nichts geht zur QNAP.",
-                       "Dockerfile, docker-compose.yml und tools/ deckt die Signatur des Dashboards nicht ab - sie kommen aus demselben "
-                       "Tag-Commit, sind aber nicht signiert. Das Werkzeug listet sie auf."],
+                       "Dockerfile, docker-compose.yml und tools/ deckt ab Dashboard 1.8.8 die Bau-Signatur (SIGNATUR-BAU.json) "
+                       "ab - jede Abweichung im Tag heißt „nicht installieren“. In die ZIP kommen nur signierte Dateien; "
+                       "alles andere listet das Werkzeug als „nicht übernommen“ auf (Ausnahme: Versionen vor 1.8.8 ohne "
+                       "Bau-Signatur - deren Bau-Dateien kommen unsigniert mit, sonst ließe sich nicht bauen)."],
         "erwartet": "„Signatur gültig“, Version, Commit und die Prüfsumme der ZIP.",
         "fehler": [("Signatur ungültig / Dateien passen nicht", "Nicht installieren. Die Version auf GitHub ist nicht so, wie du sie signiert hast."),
                    ("Kein Token / 404", "Im Reiter „GitHub“ ein Token mit Lesezugriff auf das Repository speichern.")],
@@ -482,6 +510,39 @@ SCHRITTE = {
                    ("unzip: … write error / No space left", "Entpacken abgebrochen (z. B. Speicher voll): Der Programmordner "
                     "ist nicht entstanden, nur ein halber Zwischenordner …entpacken-… (wird nicht benutzt, kann von Hand "
                     "gelöscht werden). Platz schaffen und den Schritt wiederholen - oder „Zur vorigen Version zurück“.")],
+    },
+    "compose_vergleich": {
+        "titel": "docker-compose.yml vergleichen", "art": "ssh", "befehl": _b_compose_vergleich,
+        "erklaerung": ["Die neue Version bringt die signierte docker-compose.yml mit. Hast du deine auf der QNAP angepasst "
+                       "(Port, SR_UPDATE_SCHLUESSEL, SR_UID/SR_GID, „.:/app:ro“), wären diese Änderungen sonst weg - deine "
+                       "Fassung liegt nur noch im beiseitegelegten …alt-Ordner.",
+                       "Dieser Schritt zeigt nur die Unterschiede (Zeilen mit „-“: signierte Fassung, mit „+“: deine "
+                       "bisherige). Es wird nichts verändert."],
+        "erwartet": "„GLEICH“: beide gleich - den nächsten Schritt überspringen. „UNTERSCHIEDE“ und darüber die Zeilen: "
+                    "prüfen, ob nur deine eigenen Anpassungen abweichen.",
+        "fehler": [("No such file or directory", "Eine der beiden Dateien fehlt (z. B. erste Installation ohne eigene "
+                    "Fassung) - dann den nächsten Schritt überspringen."),
+                   ("diff: not found", "Kein diff auf der QNAP: beide Dateien mit „cat“ ansehen oder den nächsten Schritt "
+                    "nur übernehmen, wenn du sicher bist, dass die alte Fassung nur deine Anpassungen enthält.")] + _SSH_FEHLER,
+    },
+    "compose_uebernehmen": {
+        "titel": "Eigene docker-compose.yml übernehmen", "art": "ssh", "befehl": _b_compose_uebernehmen, "optional": True,
+        "erklaerung": ["Kopiert deine bisherige docker-compose.yml aus dem …alt-Ordner in den neuen Programmordner - nur, "
+                       "wenn der Vergleich ausschließlich deine eigenen Anpassungen zeigt. Bringt die neue Version "
+                       "selbst Änderungen an der Datei (Zeilen mit „-“, die du nicht kennst), stattdessen überspringen "
+                       "und deine Anpassungen nach der Installation von Hand nachtragen.",
+                       "Die Bau-Prüfung meldet danach Ergebnis 1 („docker-compose.yml weicht ab“) - das ist dann gewollt."],
+        "erwartet": "Eine Zeile mit docker-compose.yml im neuen Programmordner.",
+        "fehler": [("ABBRUCH: … fehlt - nichts kopiert", "Programmordner oder alte Datei gibt es nicht - überspringen.")]
+        + _SSH_FEHLER,
+    },
+    "uebersicht": {
+        "titel": "Elternordner ansehen", "art": "ssh", "befehl": _b_uebersicht, "optional": True,
+        "erklaerung": ["Zeigt den Elternordner des Programmordners. Übrig gebliebene …kaputt-… (nach einem Rückweg) und "
+                       "…entpacken-…-Ordner (nach abgebrochenem Entpacken) räumt das Werkzeug nicht selbst weg - "
+                       "jeder ist eine vollständige Programmkopie. Brauchst du sie nicht mehr, von Hand löschen.",
+                       "Es wird nichts verändert."],
+        "erwartet": "Ordnerliste mit Programmordner und Daten-Ordner.", "fehler": _SSH_FEHLER,
     },
     "bau_vorpruefung": {
         "titel": "Kennt das Programm die Bau-Prüfung?", "art": "ssh", "befehl": _b_bau_vorpruefung,
@@ -600,7 +661,8 @@ for _sid, _s in SCHRITTE.items():
 ABLAEUFE = {
     "installieren": {"titel": "Neue Version installieren",
                      "schritte": ["vorbereitung", "verbindung", "werkzeuge", "version", "hochladen", "ordner", "zustand",
-                                  "anhalten", "beiseite", "entpacken", "bau_vorpruefung", "bau_pruefen_run", "bauen",
+                                  "anhalten", "beiseite", "entpacken", "compose_vergleich", "compose_uebernehmen",
+                                  "bau_vorpruefung", "bau_pruefen_run", "bauen",
                                   "starten", "kontrolle",
                                   "alt_loeschen", "zip_loeschen", "images"]},
     "neubau": {"titel": "Nur neu bauen (gleiche Version)",
@@ -611,7 +673,7 @@ ABLAEUFE = {
                 "schritte": ["verbindung", "anhalten:optional", "wegstellen", "zurueckholen", "bau_vorpruefung",
                              "bau_pruefen_run", "bauen", "starten", "kontrolle"]},
     "aufraeumen": {"titel": "Aufräumen (alter Ordner, ZIP, Images)",
-                   "schritte": ["verbindung", "alt_loeschen", "zip_loeschen", "images"]},
+                   "schritte": ["verbindung", "alt_loeschen", "zip_loeschen", "images", "uebersicht"]},
 }
 
 
@@ -942,9 +1004,14 @@ class Begleiter:
             paket = lauf.get("paket") or {}
             if not paket.get("zip"):
                 raise ValueError("Erst Schritt „Version laden und prüfen“ abschließen.")
-            argv = scp_argv(pr, paket["zip"], o["e"] + "/" + _zip_pruefen(o, paket.get("zipname")), self.prog)
+            # relativ zum Datenordner (dort startet das Fenster): der Pfad mit dem Windows-Benutzernamen
+            # (evtl. mit „!“ oder „%“, die cmd.exe auswertet) steht so nicht in der Befehlszeile
+            lokal = paket["zip"]
+            if os.path.dirname(os.path.dirname(os.path.abspath(lokal))) == os.path.abspath(self.ordner):
+                lokal = os.path.relpath(os.path.abspath(lokal), os.path.abspath(self.ordner))
+            argv = scp_argv(pr, lokal, o["e"] + "/" + _zip_pruefen(o, paket.get("zipname")), self.prog)
             programm, zeile = befehlszeile(argv, self.prog)
-            return f"scp -P {pr['port']} -- {paket['zip']} {argv[-1]}", programm, zeile
+            return f"scp -P {pr['port']} -- {lokal} {argv[-1]}", programm, zeile
         return "", "", ""
 
     def _erwartet_name(self, s, pr, z):

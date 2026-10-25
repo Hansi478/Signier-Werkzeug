@@ -684,11 +684,12 @@ def bau_signatur_bauen(privat, version, dateien):
                        "signatur": base64.b64encode(signatur).decode("ascii")}, indent=1, sort_keys=True) + "\n"
 
 
-def bau_pruefen(wurzel, oeffentlich):
+def bau_pruefen(wurzel, oeffentlich, vor_ort=True):
     """Wie _bau_pruefung im Dashboard -> {"stufe": ok|warn|fehler|fehlt, "text", …}.
     fehler: Signatur ungültig, unzulässige Einträge oder eine signierte Datei (außer
     docker-compose.yml) verändert. warn: nur docker-compose.yml angepasst, Dateien
-    fehlen, zusätzliche Dateien oder Signatur einer anderen Version."""
+    fehlen, zusätzliche Dateien oder Signatur einer anderen Version.
+    vor_ort=False (Stand von GitHub): dort gibt es keine lokale Anpassung - der Text sagt das nicht."""
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     erg = {"stufe": "ok", "text": "", "veraendert": [], "fehlt_datei": [], "zusaetzlich": [], "version": "", "anzahl": 0}
@@ -730,7 +731,8 @@ def bau_pruefen(wurzel, oeffentlich):
         return erg
     hinweise = []
     if [n for n in erg["veraendert"] if n in BAU_NUR_WARNEN]:
-        hinweise.append("docker-compose.yml weicht ab (lokal angepasst?)")
+        hinweise.append("docker-compose.yml weicht ab" + (" (lokal angepasst?)" if vor_ort else
+                                                          " (nach dem Signieren geändert)"))
     if erg["fehlt_datei"]:
         hinweise.append("fehlen: " + ", ".join(erg["fehlt_datei"][:6]))
     if erg["zusaetzlich"]:
@@ -1505,9 +1507,62 @@ def pakete_signatur_gueltig(daten, oeffentlich, summe, version):
     return sig["lock_sha256"] == summe and sig["programmversion"] == version
 
 
+def _paket_name(n):
+    return re.sub(r"[-_.]+", "-", n).lower()
+
+
 def _pakete_stand(text):
     """{Paketname (normalisiert): Version} aus einer Lock-Datei."""
-    return {re.sub(r"[-_.]+", "-", n).lower(): v for n, v in _PAKET_RE.findall(text)}
+    return {_paket_name(n): v for n, v in _PAKET_RE.findall(text)}
+
+
+# eine Anforderung, wie tools/lock_erzeugen.py des Dashboards sie schreibt (Fortsetzungen zusammengefügt):
+# „name[extras]==version [; Marker] --hash=sha256:… [--hash=sha256:…]“
+_PAKET_ZEILE_RE = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9._,\s-]*\])?==([A-Za-z0-9._+!-]+)"
+                             r"(?:\s*;(?:(?!--)[^#\\])*?)?((?:\s+--hash=sha256:[0-9a-f]{64})+)")
+
+
+def _logische_zeilen(text):
+    """Zeilen einer Lock-Datei, Fortsetzungen („\\“ am Zeilenende) zusammengefügt -> [(Zeilennummer, Text)]."""
+    out, teil, nr = [], "", 0
+    for i, z in enumerate(text.replace("\r\n", "\n").split("\n"), 1):
+        if not teil:
+            nr = i
+        if z.endswith("\\"):
+            teil += z[:-1] + " "
+            continue
+        out.append((nr, teil + z))
+        teil = ""
+    if teil:
+        out.append((nr, teil))
+    return out
+
+
+def pakete_zeilen_pruefen(text):
+    """Streng: nur Kommentare, Leerzeilen und Anforderungen „name==version [; Marker]“ mit Prüfsummen
+    -> {Paket: (Version, {SHA-256})}. Alles andere ist ein Fehler: pip übernähme aus der Datei auch
+    Optionen (--index-url, --find-links, -r …) und Direkt-URLs, die die Anzeige nicht zeigt."""
+    pakete = {}
+    for nr, z in _logische_zeilen(text):
+        z = z.strip()
+        if not z or z.startswith("#"):
+            continue
+        m = _PAKET_ZEILE_RE.fullmatch(z)
+        if not m:
+            raise ValueError(f"{PAKETE_DATEI}, Zeile {nr}: erlaubt sind nur „paket==version“ mit „--hash=sha256:…“ "
+                             f"(keine Optionen wie --index-url oder -r, keine Direkt-URLs): {z[:80]!r} - nicht signiert.")
+        k = _paket_name(m.group(1))
+        if k in pakete:
+            raise ValueError(f"{PAKETE_DATEI}, Zeile {nr}: {m.group(1)} steht doppelt in der Liste - nicht signiert.")
+        pakete[k] = (m.group(2), frozenset(re.findall(r"sha256:([0-9a-f]{64})", m.group(3))))
+    return pakete
+
+
+def _pakete_pruefsummen(text):
+    try:
+        return {k: h for k, (_v, h) in pakete_zeilen_pruefen(text).items()}
+    except ValueError:
+        return {}
 
 
 CLOUDFLARED_ARCHITEKTUREN = ("amd64", "arm64", "armhf", "windows-amd64")
@@ -1534,15 +1589,18 @@ def pakete_cloudflared(text):
     return {"version": m.group(1), "sha256": dict(paare)}
 
 
-def _cloudflared_unterschied(alt, neu):
-    """alt: zuletzt signierte Liste auf dem Zweig (oder None), neu: die zu signierende."""
+def _cloudflared_unterschied(alt, neu, bekannt=True):
+    """alt: zuletzt signierte Liste auf dem Zweig (oder None), neu: die zu signierende.
+    bekannt=False: die vorige Liste ließ sich nicht ermitteln."""
     try:
         a = pakete_cloudflared(alt) if alt else None
     except ValueError:
         a = None
     n = pakete_cloudflared(neu)
     if not n:
-        return []
+        return [f"cloudflared-Zeile entfällt (bisher {a['version']})"] if a else []
+    if not bekannt:
+        return [f"cloudflared {n['version']} (bisher unbekannt - vorige Liste nicht ermittelbar)"]
     if not a:
         return [f"cloudflared {n['version']} (bisher keine)"]
     if a["version"] != n["version"]:
@@ -1577,27 +1635,32 @@ def pakete_debian(text):
     return {"codename": m.group(1), "zeitpunkt": m.group(2)}
 
 
-def _debian_text(alt, neu):
-    """z. B. „Debian trixie: Stand 24.10.2026 (bisher 26.09.2026)“ oder „…(bisher keiner)“."""
+def _debian_text(alt, neu, bekannt=True):
+    """z. B. „Debian trixie: Stand 24.10.2026 (bisher 26.09.2026)“ oder „…(bisher keiner)“;
+    fehlt die Zeile, die vorige Liste hatte aber eine: „Debian-Zeile entfällt …“."""
+    datum = lambda z: f"{z[6:8]}.{z[4:6]}.{z[0:4]}"
     n = pakete_debian(neu)
-    if not n:
-        return ""
     try:
         a = pakete_debian(alt) if alt else None
     except ValueError:
         a = None
-    datum = lambda z: f"{z[6:8]}.{z[4:6]}.{z[0:4]}"
-    bisher = (f"bisher {datum(a['zeitpunkt'])}" + (f", {a['codename']}" if a["codename"] != n["codename"] else "")
+    if not n:
+        return f"Debian-Zeile entfällt (bisher {a['codename']}, Stand {datum(a['zeitpunkt'])})" if a else ""
+    bisher = ("bisher unbekannt - vorige Liste nicht ermittelbar" if not bekannt else
+              f"bisher {datum(a['zeitpunkt'])}" + (f", {a['codename']}" if a["codename"] != n["codename"] else "")
               if a else "bisher keiner")
     return f"Debian {n['codename']}: Stand {datum(n['zeitpunkt'])} ({bisher})"
 
 
-def _zuletzt_signierte_paketliste(repo, token, stand, oeffentlich, tiefe=10):
+def _zuletzt_signierte_paketliste(repo, token, stand, oeffentlich, tiefe=20):
     """PAKETE.lock, die auf dem Zweig „pakete“ zuletzt gültig signiert war (vor
-    dem Stand `stand`), für die Anzeige „alt → neu“ - oder None."""
+    dem Stand `stand`), für die Anzeige „alt → neu“ -> (Text oder None, ermittelt).
+    ermittelt=False: Abfrage gescheitert oder in `tiefe` Commits keine gefunden -
+    dann ist „bisher keine“ nicht sicher (die Anzeige sagt „unbekannt“)."""
     try:
         commits = _gh(f"/repos/{repo}/commits?sha={stand}&per_page={tiefe + 1}", token)
-        for c in commits[1:] if isinstance(commits, list) else []:
+        commits = commits if isinstance(commits, list) else []
+        for c in commits[1:]:
             sha = str((c or {}).get("sha") or "")
             if not re.fullmatch(r"[0-9a-f]{40}", sha):
                 continue
@@ -1605,18 +1668,25 @@ def _zuletzt_signierte_paketliste(repo, token, stand, oeffentlich, tiefe=10):
             lock = _blob(repo, token, baum, PAKETE_DATEI, PAKETE_MAX)
             sig = _blob(repo, token, baum, PAKETE_SIGNATUR_DATEI, MAX_SIGNATUR_BYTES)
             if lock and sig:
-                version = pakete_version(lock)
-                if pakete_signatur_gueltig(sig, oeffentlich, pakete_pruefsumme(lock), version):
-                    return lock.decode("utf-8")
-    except (ValueError, UnicodeDecodeError):
-        pass
-    return None
+                try:   # ein Commit mit unbrauchbarer Liste beendet die Suche nicht
+                    text = lock.decode("utf-8")
+                    if pakete_signatur_gueltig(sig, oeffentlich, pakete_pruefsumme(lock), pakete_version(lock)):
+                        return text, True
+                except (ValueError, UnicodeDecodeError):
+                    continue
+    except ValueError:
+        return None, False
+    return None, len(commits) <= tiefe   # ganze Geschichte durchsucht: es gab wirklich keine
 
 
 def pakete_unterschiede(alt, neu):
     """Unterschiede der Paketversionen, z. B. „pypdf 6.20.1 → 6.21.1“."""
     a, n = _pakete_stand(alt), _pakete_stand(neu)
+    ha, hn = _pakete_pruefsummen(alt), _pakete_pruefsummen(neu)
     out = [f"{k} {a[k]} → {n[k]}" for k in sorted(a.keys() & n.keys()) if a[k] != n[k]]
+    # gleiche Version, andere Dateien: PyPI-Dateien sind unveränderlich - neu ist höchstens eine zusätzliche Datei
+    out += [f"{k} {n[k]}: Prüfsummen geändert ({len(hn[k] - ha[k])} neu, {len(ha[k] - hn[k])} entfallen) - bitte prüfen"
+            for k in sorted(a.keys() & n.keys()) if a[k] == n[k] and k in ha and k in hn and ha[k] != hn[k]]
     out += [f"{k} {n[k]} (neu)" for k in sorted(n.keys() - a.keys())]
     out += [f"{k} {a[k]} (entfällt)" for k in sorted(a.keys() - n.keys())]
     return out
@@ -1639,7 +1709,7 @@ def _blob(repo, token, baum, pfad, limit):
     return daten
 
 
-def pakete_stand(pr, token):
+def pakete_stand(pr, token, vergleich=True):
     """Paketliste auf dem Zweig „pakete“ laden und vorprüfen (ohne Kennwort)
     -> Angaben für die Anzeige und zum Signieren. Abbruch, wenn es keine Liste
     gibt oder sie zu keiner signierten Programmversion gehört."""
@@ -1657,6 +1727,7 @@ def pakete_stand(pr, token):
     if lock is None:
         raise ValueError(f"Keine Paketliste zum Signieren ({PAKETE_DATEI} fehlt auf dem Zweig „{PAKETE_ZWEIG}“).")
     version = pakete_version(lock)
+    pakete_zeilen_pruefen(lock.decode("utf-8"))   # nur Anforderungen mit Prüfsummen - keine pip-Optionen
     cloudflared = pakete_cloudflared(lock.decode("utf-8"))   # Format prüfen, bevor etwas angezeigt wird
     debian = pakete_debian(lock.decode("utf-8"))
     summe = pakete_pruefsumme(lock)
@@ -1681,20 +1752,25 @@ def pakete_stand(pr, token):
         raise ValueError(f"requirements.lock im Tag v{version} passt nicht zur Signatur - abgebrochen.")
     vorhanden = _blob(repo, token, baum, PAKETE_SIGNATUR_DATEI, MAX_SIGNATUR_BYTES)
     # Vergleich für cloudflared und Debian: die Liste, die auf dem Zweig zuletzt gültig signiert war
-    vorige = _zuletzt_signierte_paketliste(repo, token, stand, pr.get("oeffentlich") or "") \
-        if cloudflared or debian else None
+    # (auch ohne Zeile in der neuen Liste - sonst bliebe ihr Wegfall unbemerkt); beim Signieren nicht nötig
+    vorige, bekannt = _zuletzt_signierte_paketliste(repo, token, stand, pr.get("oeffentlich") or "") \
+        if vergleich else (None, False)
+    neu = lock.decode("utf-8")
+    debian_text = _debian_text(vorige, neu, bekannt) if vergleich else ""
     return {"repo": repo, "stand": stand, "baum": baum, "version": version, "summe": summe,
-            "unterschiede": pakete_unterschiede(alt.decode("utf-8", "replace") if alt else "", lock.decode("utf-8"))
-            + (_cloudflared_unterschied(vorige, lock.decode("utf-8")) if cloudflared else []),
+            "unterschiede": pakete_unterschiede(alt.decode("utf-8", "replace") if alt else "", neu),
+            # Bezug: die zuletzt signierte Liste (nicht der Tag)
+            "seit_signiert": (_cloudflared_unterschied(vorige, neu, bekannt) if vergleich else [])
+            + ([debian_text] if debian_text.startswith("Debian-Zeile entfällt") else []),
             "cloudflared": cloudflared["version"] if cloudflared else "",
-            "debian": _debian_text(vorige, lock.decode("utf-8")) if debian else "",
+            "debian": debian_text if debian else "",
             "bereits": bool(vorhanden) and pakete_signatur_gueltig(vorhanden, pr.get("oeffentlich") or "", summe, version)}
 
 
 def pakete_signieren(pr, kennwort, token, summe_gesehen):
     """Die angezeigte Liste signieren und SIGNATUR-PAKETE.json in einem Commit
     auf den Zweig „pakete“ hochladen (nur vorspulen) -> Meldung."""
-    st = pakete_stand(pr, token)
+    st = pakete_stand(pr, token, vergleich=False)
     if st["summe"] != summe_gesehen:
         raise ValueError("Die Paketliste hat sich seit der Anzeige geändert - bitte erneut prüfen. Nichts signiert.")
     if st["bereits"]:
@@ -2007,12 +2083,17 @@ def _powershell(skript):
         raise ValueError("Auswahlfenster nur unter Windows - bitte den Pfad eintippen.")
     skript = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + skript   # Pfade mit Umlauten
     try:
-        r = subprocess.run(["powershell", "-NoProfile", "-STA", "-Command", skript], capture_output=True,
+        # fester Pfad: ohne ihn sucht Windows zuerst im Ordner der exe (oft „Downloads“) und im aktuellen Ordner
+        ps = os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "System32", "WindowsPowerShell", "v1.0",
+                          "powershell.exe")
+        r = subprocess.run([ps, "-NoProfile", "-STA", "-Command", skript], capture_output=True,
                            encoding="utf-8", errors="replace", timeout=600,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except subprocess.TimeoutExpired:
         raise ValueError("Das Auswahlfenster war 10 Minuten offen und wurde geschlossen - bitte erneut wählen "
                          "(es liegt evtl. hinter dem Browser).") from None
+    except OSError:
+        raise ValueError("Das Auswahlfenster ließ sich nicht öffnen (PowerShell fehlt) - bitte den Pfad eintippen.") from None
     return (r.stdout or "").strip()
 
 
@@ -2202,10 +2283,20 @@ def qnap_paket(pr, token, tag, name, ziel, datei=None):
                              "Nicht installieren.")
         if str(r.get("version") or "") != version or ordner_version(ordner) != version:
             raise ValueError(f"{tag}: Version in SIGNATUR.json bzw. VERSION passt nicht zum Tag - nicht installieren.")
-        signiert = set(json.loads(regulaer_lesen(os.path.join(ordner, SIGNATUR_DATEI), MAX_SIGNATUR_BYTES))["dateien"])
-        bau = bau_pruefen(ordner, pr.get("oeffentlich") or "") if pr.get("regel") == "speedrace" else {"stufe": "fehlt"}
+        # Namen in NFC wie in pruefen() - sonst fehlte eine (z. B. auf macOS signierte) Datei in der ZIP
+        signiert = {unicodedata.normalize("NFC", n) for n in json.loads(
+            regulaer_lesen(os.path.join(ordner, SIGNATUR_DATEI), MAX_SIGNATUR_BYTES))["dateien"]}
+        bau = bau_pruefen(ordner, pr.get("oeffentlich") or "", vor_ort=False) if pr.get("regel") == "speedrace" \
+            else {"stufe": "fehlt"}
         if bau["stufe"] == "fehler":
             raise ValueError(f"{tag}: {bau['text']} Nicht installieren.")
+        if bau["stufe"] == "warn" and (bau["veraendert"] or bau["fehlt_datei"]):
+            # im Tag gibt es nichts „vor Ort anzupassen“: eine Abweichung (auch bei docker-compose.yml)
+            # heißt, dass nach dem Signieren etwas geändert wurde - sie liefe auf dem NAS schon bei der Bau-Prüfung
+            teile = ([f"verändert: {', '.join(bau['veraendert'][:6])}"] if bau["veraendert"] else []) \
+                + ([f"fehlen: {', '.join(bau['fehlt_datei'][:6])}"] if bau["fehlt_datei"] else [])
+            raise ValueError(f"{tag}: Bau-Dateien im Tag passen nicht zu {BAU_SIGNATUR_DATEI} ({'; '.join(teile)}) - "
+                             "nach dem Signieren geändert. Nicht installieren.")
         if bau["stufe"] == "fehlt" and pr.get("regel") == "speedrace" and \
                 b"--bau-pruefen" in regulaer_lesen(os.path.join(ordner, "app.py")):
             # die signierte app.py kennt die Bau-Prüfung: Fehlen der Bau-Signatur ist kein Altbestand
@@ -2223,7 +2314,8 @@ def qnap_paket(pr, token, tag, name, ziel, datei=None):
         alle = sorted(rel for rel, _ in eintraege)
         # nur Signiertes übernehmen: alles andere landete sonst ungeprüft im Programmordner
         # (z. B. eine fremde json.py, die Python vor der Standardbibliothek lädt)
-        dateien = [rel for rel in alle if rel in signiert or rel in bau_signiert or rel in bau_unsigniert
+        dateien = [rel for rel in alle if unicodedata.normalize("NFC", rel) in signiert or rel in bau_signiert
+                   or rel in bau_unsigniert
                    or rel in (SIGNATUR_DATEI, BAU_SIGNATUR_DATEI)]
         if not dateien:
             raise ValueError(f"{tag}: keine signierten Dateien - nicht installieren.")
@@ -2251,7 +2343,9 @@ def qnap_paket(pr, token, tag, name, ziel, datei=None):
     unsigniert = [rel for rel in alle if rel not in dateien]   # nicht übernommen
     return {"tag": tag, "version": version, "commit": commit, "zip": os.path.join(ziel, datei),
             "sha256": hashlib.sha256(daten).hexdigest(), "dateien": len(dateien), "signiert": len(signiert),
-            "bau_signiert": len(bau_signiert), "bau_stufe": bau["stufe"], "bau_text": bau.get("text", ""),
+            "bau_signiert": len(bau_signiert), "bau_stufe": bau["stufe"],
+            "bau_text": (f"nicht signierte Bau-Dateien, nicht übernommen: {', '.join(bau['zusaetzlich'][:6])}"
+                         if bau["stufe"] == "warn" else bau.get("text", "")),
             "unsigniert": unsigniert[:200], "unsigniert_anzahl": len(unsigniert),
             "bau_unsigniert": sorted(bau_unsigniert)[:200]}
 
@@ -2259,7 +2353,9 @@ def qnap_paket(pr, token, tag, name, ziel, datei=None):
 def qnap_aktion(name, p):
     with _lock:
         d = profile_laden()
-        quellen = {x["id"]: x for x in d.get("profile") or [] if x.get("repo") and x.get("oeffentlich") and x.get("id")}
+        # nur Speedrace-Profile: die Abläufe (docker compose, Bau-Prüfung) gelten nur für das Dashboard
+        quellen = {x["id"]: x for x in d.get("profile") or []
+                   if x.get("repo") and x.get("oeffentlich") and x.get("id") and x.get("regel") == "speedrace"}
         token = geheim_lesen(d.get("github_token"))
     b = _qnap()
     liste = [{"id": k, "name": v.get("name"), "repo": v.get("repo")} for k, v in quellen.items()]
@@ -2267,7 +2363,8 @@ def qnap_aktion(name, p):
     def quelle(pr):
         q = quellen.get((pr or {}).get("quelle"))
         if not q:
-            raise ValueError("Im QNAP-Profil ist kein gültiges Signier-Profil (mit Repository und Schlüssel) gewählt.")
+            raise ValueError("Im QNAP-Profil ist kein gültiges Signier-Profil „Speedrace-Dashboard“ (mit Repository und "
+                             "Schlüssel) gewählt.")
         return q
     if name == "qnap_zustand":
         antwort = b.ansicht(p.get("ablauf"))
@@ -2469,6 +2566,9 @@ def aktion(name, p):
         ordner = str(p.get("ordner") or "").strip().strip('"')
         if not os.path.isdir(ordner):
             raise ValueError("Ordner nicht gefunden.")
+        # Kennwort zuerst: ein Fehlversuch legt sonst jedes Mal eine weitere Sicherungskopie an
+        if oeffentlich_text(privat_laden(schluessel_pfad(pr), str(p.get("kennwort") or ""))) != pr.get("oeffentlich"):
+            raise ValueError("Der Schlüssel passt nicht zum öffentlichen Schlüssel des Profils.")
         gesichert = _fremde_signatur_sichern(ordner, pr)
         if pr.get("regel") == "speedrace":
             version, anzahl, _, bau_inhalt, bau_anzahl = signieren_mit_bau(ordner, pr, str(p.get("kennwort") or ""))
@@ -2495,7 +2595,7 @@ def aktion(name, p):
         if not token:
             raise ValueError("Dazu wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
         st = pakete_stand(pr, token)
-        return {k: st[k] for k in ("version", "summe", "unterschiede", "bereits", "cloudflared", "debian")}
+        return {k: st[k] for k in ("version", "summe", "unterschiede", "seit_signiert", "bereits", "cloudflared", "debian")}
     if name == "pakete_signieren":
         if not token:
             raise ValueError("Dazu wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
@@ -2508,7 +2608,7 @@ def aktion(name, p):
             ordner, stand = github_laden(pr["repo"], pr.get("zweig") or "main", token, tmp)
             if name == "pruefen_github":
                 return {"pruefung": pruefen(ordner, pr.get("oeffentlich") or "", pr.get("regel", "alle"), pr.get("ausschluss")),
-                        "bau": bau_pruefen(ordner, pr.get("oeffentlich") or "") if speedrace else None,
+                        "bau": bau_pruefen(ordner, pr.get("oeffentlich") or "", vor_ort=False) if speedrace else None,
                         "stand": stand[:7]}
             if not token:
                 raise ValueError("Zum Hochladen wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
@@ -2935,7 +3035,7 @@ Version __VERSION__ <button class="zweit info" id="info-knopf" title="Handbuch (
    <div><label for="q-benutzer">Benutzer</label><input id="q-benutzer" placeholder="admin-benutzer" autocomplete="off"></div></div>
   <div class="zeile"><div><label for="q-ordner">Programmordner auf der QNAP (absolut)</label><input id="q-ordner" placeholder="/share/BEISPIEL/programmordner" autocomplete="off"></div>
    <div><label for="q-adresse">Dashboard-Adresse (optional, für die Kontrolle)</label><input id="q-adresse" placeholder="http://192.0.2.10:8090" autocomplete="off"></div></div>
-  <div class="zeile"><div><label for="q-quelle">Versionen von (Signier-Profil mit GitHub-Repository)</label><select id="q-quelle"></select></div>
+  <div class="zeile"><div><label for="q-quelle">Versionen von (Speedrace-Profil mit GitHub-Repository)</label><select id="q-quelle"></select></div>
    <div><label for="q-compose">Docker-Variante</label><select id="q-compose"><option value="plugin">docker compose</option><option value="standalone">docker-compose</option></select></div>
    <div><label for="q-bin">Ordner der Docker-Programme (nur falls nötig)</label><input id="q-bin" placeholder="leer lassen" autocomplete="off"></div></div>
   <div class="zeile" style="margin-top:12px"><button id="q-speichern">Profil speichern</button></div>
@@ -3019,14 +3119,16 @@ function profilInfo() {
 }
 let paketeSumme = "";   // genau die angezeigte Liste wird signiert
 $("s-pakete-pruefen").onclick = e => mit("s-status", e.target, "Lade die Paketliste …", async () => {
-  const p = profilPruefen($("s-profil").value);
+  const p = Z.profile.find(x => x.id === $("s-profil").value);   // nur der öffentliche Schlüssel wird gebraucht
+  if (!p || !p.oeffentlich) throw new Error("Das Profil hat noch keinen Schlüssel (Reiter „Profile & Schlüssel“).");
   const d = await api("pakete_pruefen", {id: p.id});
   paketeSumme = d.bereits ? "" : d.summe;
   $("s-pakete-info").innerHTML = `Programmversion <b>${esc(d.version)}</b>, Prüfsumme <span class="mono">${esc(d.summe)}</span>`
     + (d.cloudflared ? `, cloudflared <b>${esc(d.cloudflared)}</b>` : "") + ". "
     + (d.debian ? `<br>${esc(d.debian)}. ` : "")
-    + (d.unterschiede.length ? "Änderungen gegenüber v" + esc(d.version) + ":<ul>" + d.unterschiede.map(u => `<li class="mono">${esc(u)}</li>`).join("") + "</ul>"
-       : "Keine Änderungen gegenüber v" + esc(d.version) + ". ");
+    + (d.unterschiede.length ? "Python-Pakete gegenüber v" + esc(d.version) + ":<ul>" + d.unterschiede.map(u => `<li class="mono">${esc(u)}</li>`).join("") + "</ul>"
+       : "Python-Pakete: keine Änderungen gegenüber v" + esc(d.version) + ". ")
+    + (d.seit_signiert.length ? "Gegenüber der zuletzt signierten Liste:<ul>" + d.seit_signiert.map(u => `<li class="mono">${esc(u)}</li>`).join("") + "</ul>" : "");
   $("s-pakete-los-zeile").classList.toggle("versteckt", !!d.bereits);
   status("s-status", "ok", d.bereits ? "✅ Diese Paketliste ist bereits signiert – nichts zu tun." : "✅ Paketliste geprüft – bitte die Änderungen ansehen und dann signieren.");
 });

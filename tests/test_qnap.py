@@ -157,7 +157,8 @@ class BefehlTests(unittest.TestCase):
         erlaubt = {"'/share/BEISPIEL'", "'/share/BEISPIEL/programmordner'", "'programmordner'", "'programmordner.signier-20260101-1200.zip'",
                    "'programmordner.alt-20260101-1200'", "'programmordner.alt-20260101-1300'",
                    "'programmordner.entpacken-20260101-130000'", "'programmordner.entpacken-20260101-130000/programmordner'",
-                   "'programmordner.kaputt-20260101-1300'", "'--bau-pruefen'", "'/share/BEISPIEL/programmordner/app.py'"}
+                   "'programmordner.kaputt-20260101-1300'", "'--bau-pruefen'", "'/share/BEISPIEL/programmordner/app.py'",
+                   "'programmordner/docker-compose.yml'", "'programmordner.alt-20260101-1200/docker-compose.yml'"}
         import re
         for sid, s in Q.SCHRITTE.items():
             if not s.get("befehl"):
@@ -363,6 +364,8 @@ class InstallierenTests(Ablauf):
         alt = self.b.ansicht()["alt"]
         self.assertRegex(alt, r"^programmordner\.alt-\d{8}-\d{4}$")
         self.schritt("entpacken")
+        self.schritt("compose_vergleich")
+        self.b.rueckmelden("compose_uebernehmen", "uebersprungen", {})
         self.schritt("bau_vorpruefung", treffer="mehr")
         self.schritt("bau_pruefen_run", bauergebnis="0")
         for sid in ("bauen", "starten", "kontrolle"):
@@ -385,7 +388,7 @@ class InstallierenTests(Ablauf):
         scp = [z for z in self.gestartet if "scp.exe" in z]
         self.assertEqual(len(scp), 1)
         self.assertRegex(scp[0], r'"admin-benutzer@192\.0\.2\.10:/share/BEISPIEL/programmordner\.signier-\d{8}-\d{4}\.zip"')
-        self.assertEqual(len(self.gestartet), 14)   # jeder SSH-/scp-Schritt einzeln
+        self.assertEqual(len(self.gestartet), 15)   # jeder SSH-/scp-Schritt einzeln
 
     def test_version_nur_tag(self):
         self.b.beginnen("installieren")
@@ -444,6 +447,8 @@ class InstallierenTests(Ablauf):
         self.b.ausfuehren("beiseite", v["marke"], {"bestaetigt": True, "name": "programmordner"})
         self.b.rueckmelden("beiseite", "geklappt", {})
         self.schritt("entpacken")
+        self.schritt("compose_vergleich")
+        self.b.rueckmelden("compose_uebernehmen", "uebersprungen", {})
         self.schritt("bau_vorpruefung", treffer="mehr")
         if pruef_fehler is not None:
             self.schritt("bau_pruefen_run", "fehler", **({"bauergebnis": pruef_fehler} if pruef_fehler else {}))
@@ -524,6 +529,8 @@ class InstallierenTests(Ablauf):
         self.b.rueckmelden("beiseite", "geklappt", {})
         alt = self.b.ansicht()["alt"]
         self.schritt("entpacken")
+        self.schritt("compose_vergleich")
+        self.b.rueckmelden("compose_uebernehmen", "uebersprungen", {})
         self.schritt("bau_vorpruefung", treffer="mehr")
         self.schritt("bau_pruefen_run", bauergebnis="0")
         for sid in ("bauen", "starten", "kontrolle"):
@@ -831,7 +838,9 @@ class AnbindungTests(unittest.TestCase):
         self._env.start()
         W._sitzung["token"] = ""
         W.profile_speichern({"profile": [{"id": "quelle01", "name": "Beispiel", "repo": "Besitzer/beispiel",
-                                          "zweig": "main", "regel": "alle", "oeffentlich": "x" * 44, "ausschluss": []}]})
+                                          "zweig": "main", "regel": "speedrace", "oeffentlich": "x" * 44, "ausschluss": []},
+                                         {"id": "andere01", "name": "Andere", "repo": "Besitzer/andere", "zweig": "main",
+                                          "regel": "alle", "oeffentlich": "y" * 44, "ausschluss": []}]})
         with open(W._profile_datei(), "rb") as f:
             self.profile_vorher = f.read()
 

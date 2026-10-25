@@ -116,14 +116,22 @@ Format `sr-pakete-signatur-1`, genau wie im Dashboard (`tools/signieren.py`: `pa
 - cloudflared: Die Zeile `# cloudflared: <Version> amd64=… arm64=… armhf=… windows-amd64=…`
   ist Teil der signierten Datei. Geprüft wie im Dashboard: Regex
   `^# cloudflared: (\d{4}\.\d{1,2}\.\d{1,3})((?: [a-z0-9-]+=[0-9a-f]{64})+)$`, genau diese vier
-  Architekturen je einmal (Reihenfolge egal), höchstens eine Zeile. Zum Vergleich dient die
-  Liste, die auf dem Zweig zuletzt gültig signiert war.
+  Architekturen je einmal (Reihenfolge egal), höchstens eine Zeile. Weicht sie vom Format ab,
+  signiert das Werkzeug nicht - eine unbrauchbare Angabe würde sonst mitsigniert.
 - Debian: Die Zeile `# debian: <Codename> <Zeitpunkt>` (Regex
   `^# debian: ([a-z][a-z0-9-]{1,30}) (\d{8}T\d{6}Z)$`, gültiges Datum in UTC, höchstens eine
   Zeile) ist ebenfalls Teil der signierten Datei; das Dashboard spielt genau diesen Stand aus
   snapshot.debian.org ein. Falsches Format: nicht signiert. `DEBIAN-PAKETE.txt` neben der Liste
-  ist unsigniert und dient nur zur Kontrolle. Weicht sie vom Format ab, signiert das
-  Werkzeug nicht - eine unbrauchbare Angabe würde sonst mitsigniert.
+  ist unsigniert, das Werkzeug prüft sie nicht - sie dient nur zur Kontrolle.
+- Vergleich: Python-Pakete gegenüber `requirements.lock` des Tags (auch geänderte Prüfsummen bei
+  gleicher Version); cloudflared- und Debian-Zeile gegenüber der Liste, die auf dem Zweig zuletzt
+  gültig signiert war (bis 20 Commits zurück; auch ein Wegfall wird gezeigt). Lässt sich diese
+  nicht ermitteln, steht „bisher unbekannt“ statt „bisher keine“.
+- Nur Anforderungen: Außer Kommentaren und Leerzeilen sind nur Zeilen
+  `name[extras]==version [; Marker]` mit mindestens einem `--hash=sha256:<64 hex>` erlaubt
+  (Fortsetzungen mit `\`). pip-Optionen (`--index-url`, `--extra-index-url`, `--find-links`,
+  `--trusted-host`, `-r`, `-c`, `-e`), Direkt-URLs und doppelte Pakete brechen ab - pip würde sie
+  aus der Datei übernehmen, ohne dass die Anzeige sie zeigt.
 - Signiert wird genau die angezeigte Liste: Hat sie sich seit „Prüfen“ geändert, bricht das
   Werkzeug ab. Hochgeladen wird in einem Commit auf den Zweig `pakete` (nur vorspulen).
 
@@ -380,13 +388,15 @@ Der Bereich leitet SSH-Schritte auf einer QNAP an. Er ist bewusst eng gehalten:
   (scp übergibt den Zielpfad bei älteren Windows-Versionen an die Shell der QNAP). In
   Befehlen stehen Pfade immer in einfachen Anführungszeichen. Die fertige Befehlszeile wird
   zusätzlich auf Zeichen geprüft, die cmd.exe auch in Anführungszeichen auswertet (`%`, `!`,
-  `"`, Steuerzeichen).
+  `"`, Steuerzeichen). Die lokale ZIP übergibt scp relativ zum Datenordner (dort startet das
+  Fenster) - der Windows-Benutzername steht so nicht in der Befehlszeile.
 - **Was angefasst wird.** Im Elternordner des Programmordners nur der Programmordner
   (umbenennen, nie löschen), selbst angelegte `<Name>.alt-JJJJMMTT-hhmm`/`.kaputt-…`, der
   Zwischenordner `<Name>.entpacken-…` (entpackt wird dorthin, erst danach wird umbenannt -
   ein Abbruch hinterlässt keinen halben Programmordner) und die eigenen ZIPs
   `<Name>.signier-JJJJMMTT-hhmm.zip` (gelöscht nur, wenn vorhanden). `rm -r` gibt es nur für
-  einen `.alt-…`-Ordner, den das Werkzeug selbst angelegt und gemerkt hat. Kein `-f`, keine
+  einen `.alt-…`-Ordner, den das Werkzeug selbst angelegt und gemerkt hat. Kein `-f` (einzige Ausnahme:
+  `rm -f` auf die eigene `mktemp`-Hilfsdatei der Bau-Prüfung), keine
   Platzhalterzeichen, keine Variablen außer der Hilfsdatei der Bau-Prüfung (`mktemp`).
   Umbenennen und Löschen eines Ordners verlangen den abgetippten Namen. Der Programmordner darf nicht
   `Daten` oder `container-station-data` heißen.
@@ -398,7 +408,11 @@ Der Bereich leitet SSH-Schritte auf einer QNAP an. Er ist bewusst eng gehalten:
   Signaturdateien) - eine unsignierte Datei im Tag-Commit (etwa eine fremde `json.py`) käme
   sonst ungeprüft in den Programmordner. Auf der QNAP prüft `sha256sum -c` die Prüfsumme vor dem Entpacken.
 - **Bau-Dateien:** Ab Dashboard 1.8.8 prüft „Version laden und prüfen“ auch
-  `SIGNATUR-BAU.json` (Fehler oder andere Version: nicht installieren). Vor jedem Neubau prüft
+  `SIGNATUR-BAU.json` (Fehler oder andere Version: nicht installieren). Im Tag gilt das streng:
+  Weicht eine signierte Bau-Datei ab - auch `docker-compose.yml`, die auf dem NAS nur einen
+  Hinweis ergäbe - oder fehlt eine, wird nicht installiert. Im Tag gibt es nichts „vor Ort
+  anzupassen“, und die Datei liefe schon bei „Bau-Dateien prüfen“ (`docker compose run`).
+  Zusätzliche, unsignierte Bau-Dateien kommen nicht in die ZIP. Vor jedem Neubau prüft
   der Schritt „Bau-Dateien prüfen“ auf der QNAP mit `app.py --bau-pruefen` (fest eingebauter
   Schlüssel des Herausgebers). Vorher sucht `grep -c -- '--bau-pruefen' app.py`, ob das Programm
   den Schalter kennt; bei 0 wird die Prüfung nur nach ausdrücklicher Bestätigung übersprungen.
@@ -407,6 +421,14 @@ Der Bereich leitet SSH-Schritte auf einer QNAP an. Er ist bewusst eng gehalten:
   Ergebnis 2 sperrt den Neubau (auch serverseitig), Ergebnis 1 nur nach Bestätigung. Fehlt
   `SIGNATUR-BAU.json` bei einer Version, deren signierte `app.py` die Bau-Prüfung kennt, lehnt
   schon „Version laden und prüfen“ ab.
+- **Eigene docker-compose.yml:** Der neue Programmordner bringt die signierte
+  `docker-compose.yml` mit. Vor Ort angepasste Werte (Port, `SR_UPDATE_SCHLUESSEL`, `SR_UID`/`SR_GID`,
+  `.:/app:ro`) zeigt „docker-compose.yml vergleichen“ (`diff -u`, nur lesen); „Eigene
+  docker-compose.yml übernehmen“ (optional) kopiert die bisherige Datei aus dem `.alt`-Ordner -
+  die Bau-Prüfung meldet danach bewusst Ergebnis 1.
+- **Quellen:** Versionen nur aus Profilen „Speedrace-Dashboard“; die Abläufe gelten nur dafür.
+- **Reste:** `.kaputt-…`- und halbe `.entpacken-…`-Ordner löscht das Werkzeug nicht; „Aufräumen“
+  zeigt am Ende den Elternordner (nur `ls`).
 - **Grenze:** Ältere Versionen (vor 1.8.8) haben keine Bau-Signatur - dort bleiben
   `Dockerfile`, `docker-compose.yml` und `tools/` unsigniert; das Werkzeug übernimmt genau diese
   Bau-Dateien trotzdem in die ZIP (sonst ließe sich nicht bauen) und listet sie auf.

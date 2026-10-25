@@ -147,6 +147,9 @@ class AblaufTests(unittest.TestCase):
 
         def gh(pfad, token, *a, **k):
             if "/commits?" in pfad:   # Verlauf des Zweigs „pakete“
+                self.verlauf_abgefragt = True
+                if getattr(self, "verlauf_fehler", False):
+                    raise W.GitHubFehler("GitHub-Abfragelimit erreicht", 429)
                 return [{"sha": "5" * 40}] + ([{"sha": "8" * 40}] if "vorher" in self.dateien else [])
             for gruppe in self.dateien.values():
                 for b in gruppe.values():
@@ -189,12 +192,13 @@ class AblaufTests(unittest.TestCase):
         self.dateien["pakete"][W.PAKETE_DATEI] = LOCK + self.zeile("2026.10.0")
         d, _ = self.lauf("pakete_pruefen")
         self.assertEqual(d["cloudflared"], "2026.10.0")
-        self.assertIn("cloudflared 2026.10.0 (bisher keine)", d["unterschiede"])
+        self.assertIn("cloudflared 2026.10.0 (bisher keine)", d["seit_signiert"])
+        self.assertEqual(d["unterschiede"], ["beispiel 1.2.2 → 1.2.3"])   # Bezug Tag: nur Python-Pakete
         # vorige Liste gültig signiert: „alt → neu“
         sig = W.pakete_signatur_bauen(self.privat, "9.9.9", W.pakete_pruefsumme(alt), "2030-01-01")
         self.dateien["vorher"][W.PAKETE_SIGNATUR_DATEI] = sig.encode()
         d, _ = self.lauf("pakete_pruefen")
-        self.assertIn("cloudflared 2026.9.1 → 2026.10.0", d["unterschiede"])
+        self.assertIn("cloudflared 2026.9.1 → 2026.10.0", d["seit_signiert"])
         self.dateien["pakete"][W.PAKETE_DATEI] = LOCK + b"# cloudflared: kaputt\n"
         self.assertRaisesRegex(ValueError, "cloudflared-Zeile", self.lauf, "pakete_pruefen")
 
