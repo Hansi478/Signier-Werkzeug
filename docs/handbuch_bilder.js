@@ -82,6 +82,7 @@ const warte = ms => new Promise(ok => setTimeout(ok, ms));
       + 'cloudflared <b>2026.10.0</b>. <br>Debian trixie: Stand 24.10.2026 (bisher 26.09.2026). Python-Pakete gegenüber v1.8.12:<ul><li class="mono">pypdf 6.20.1 → 6.21.1</li></ul>'
       + 'Gegenüber der zuletzt signierten Liste:<ul><li class="mono">cloudflared 2026.9.1 → 2026.10.0</li></ul>';
     document.getElementById("s-pakete-los-zeile").classList.remove("versteckt");
+    document.getElementById("s-pakete-bau").textContent = "✅ Neue Paketliste liegt bereit – jetzt „Paketliste prüfen“.";
   });
   await foto("08_signieren", "#r-signieren .karte");
   await seite.selectOption("#s-profil", bs); await warte(200);

@@ -86,7 +86,10 @@ in einer eigenen Zeile (Abweichung bei `docker-compose.yml` nur Hinweis).
 
 Neuere Python-Pakete ohne neue Programmversion: Eine GitHub-Action des Dashboards legt eine
 getestete `PAKETE.lock` auf den Zweig `pakete`. Im Reiter „Signieren“ (Profil
-Speedrace-Dashboard) zeigt **„Paketliste prüfen“** Programmversion, Prüfsumme und die geänderten
+Speedrace-Dashboard) startet **„Neue Paketliste erstellen lassen“** diese Action auf GitHub
+(Token zusätzlich mit „Actions: Read and write“ für das Dashboard-Repository) und zeigt ihren
+Fortschritt; liegt danach eine neue Liste auf `pakete`, wird „Paketliste prüfen“ hervorgehoben.
+**„Paketliste prüfen“** zeigt Programmversion, Prüfsumme und die geänderten
 Paketversionen gegenüber `requirements.lock` im Tag `v<Version>`. **„Paketliste signieren und
 hochladen“** signiert genau diese Liste (Format `sr-pakete-signatur-1`, gleicher Schlüssel) und
 lädt `SIGNATUR-PAKETE.json` in einem Commit auf den Zweig `pakete`. Nichts an main, kein Tag.

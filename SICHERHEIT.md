@@ -132,6 +132,10 @@ Format `sr-pakete-signatur-1`, genau wie im Dashboard (`tools/signieren.py`: `pa
   (Fortsetzungen mit `\`). pip-Optionen (`--index-url`, `--extra-index-url`, `--find-links`,
   `--trusted-host`, `-r`, `-c`, `-e`), Direkt-URLs und doppelte Pakete brechen ab - pip würde sie
   aus der Datei übernehmen, ohne dass die Anzeige sie zeigt.
+- „Neue Paketliste erstellen lassen“ startet nur die Action `paketliste.yml` des
+  Profil-Repositorys (`workflow_dispatch` auf dem Zweig des Profils, ohne Eingaben) und liest
+  danach nur ihren Lauf und den Stand des Zweigs `pakete`. Das Token braucht dafür zusätzlich
+  „Actions: Read and write“. Was die Action baut, wird wie jede Liste erst geprüft und signiert.
 - Signiert wird genau die angezeigte Liste: Hat sie sich seit „Prüfen“ geändert, bricht das
   Werkzeug ab. Hochgeladen wird in einem Commit auf den Zweig `pakete` (nur vorspulen).
 

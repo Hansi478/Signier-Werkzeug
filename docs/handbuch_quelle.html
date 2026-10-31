@@ -145,7 +145,7 @@ th{background:#f1f5f9}tr{break-inside:avoid}
  <ol>
   <li>GitHub → Settings → Developer settings → Fine-grained tokens → „Generate new token“.</li>
   <li>Repository access: nur die betroffenen Repositories.</li>
-  <li>Permissions: <b>Contents: Read and write</b>.</li>
+  <li>Permissions: <b>Contents: Read and write</b>; für „Neue Paketliste erstellen lassen“ beim Dashboard zusätzlich <b>Actions: Read and write</b>.</li>
   <li>Token im Reiter <b>GitHub</b> einfügen → „Speichern“.</li>
  </ol>
  <figure><img src="bilder/07_github.png"><figcaption>Abbildung 6: Reiter „GitHub“ – oben das Token, unten die Aktionen für das Werkzeug selbst (Kapitel 10).</figcaption></figure>
@@ -203,6 +203,7 @@ th{background:#f1f5f9}tr{break-inside:avoid}
   <figcaption>Abbildung 11: Weg einer Paketliste.</figcaption>
  </figure>
  <ol>
+  <li>Optional: <b>„Neue Paketliste erstellen lassen“</b> startet die Action des Dashboards auf GitHub (sonst läuft sie wöchentlich von selbst). Das Werkzeug zeigt den Fortschritt (oft 10–30 Minuten). Danach: „Neue Paketliste liegt bereit“ – oder „keine neue Liste“ (keine neueren Pakete oder ein Test war rot; dann gibt es ein Issue im Repository). Das Token braucht dafür zusätzlich <b>Actions: Read and write</b>.</li>
   <li>Reiter <b>Signieren</b>, Speedrace-Profil wählen → <b>„Paketliste prüfen“</b> (ohne Kennwort). Angezeigt werden Programmversion, Prüfsumme, cloudflared-Version, der Debian-Stand (z. B. „Debian trixie: Stand 24.10.2026 (bisher 26.09.2026)“) die geänderten Pakete gegenüber dem Tag (z. B. „pypdf 6.20.1 → 6.21.1“, auch „Prüfsummen geändert“ bei gleicher Version) und, getrennt davon, was sich gegenüber der zuletzt signierten Liste geändert hat (cloudflared, Wegfall einer Zeile). „bisher unbekannt“ heißt: die vorige Liste ließ sich nicht ermitteln – dann selbst nachsehen. Ändert sich nur cloudflared oder der Debian-Stand, ist die Liste trotzdem zu signieren.</li>
   <li>Änderungen ansehen. Passt alles: <b>„Paketliste signieren und hochladen“</b> → Kennwort.</li>
   <li><span class="mono">SIGNATUR-PAKETE.json</span> landet in einem Commit auf dem Zweig „pakete“. Nichts an <span class="mono">main</span>, kein Tag.</li>

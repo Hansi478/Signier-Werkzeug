@@ -1786,6 +1786,84 @@ def pakete_signieren(pr, kennwort, token, summe_gesehen):
             f"hochgeladen (Commit {commit[:7]}). Die Dashboards mit Version {st['version']} bieten das Paket-Update an.")
 
 
+# Neue Paketliste erstellen lassen: startet die Action des Dashboards (nur diese eine Datei,
+# ohne Eingaben); was sie baut, wird wie immer erst geprüft und dann signiert.
+PAKETE_WORKFLOW = "paketliste.yml"
+
+
+def _pakete_repo(pr):
+    repo = pr.get("repo") or ""
+    if pr.get("regel") != "speedrace" or not _REPO_RE.match(repo):
+        raise ValueError("Paketlisten gibt es nur für Profile „Speedrace-Dashboard“ mit GitHub-Repository.")
+    return repo
+
+
+def _pakete_zweig_sha(repo, token):
+    """Stand des Zweigs „pakete“ oder "" (gibt es noch nicht)."""
+    try:
+        return _zweig_stand(repo, PAKETE_ZWEIG, token)
+    except GitHubFehler as e:
+        if e.code == 404:
+            return ""
+        raise
+
+
+def pakete_bau_starten(pr, token):
+    """Action paketliste.yml auf dem Zweig des Profils starten -> {"seit", "stand"}
+    (Startzeit in UTC und bisheriger Stand des Zweigs „pakete“, für die Auswertung)."""
+    repo = _pakete_repo(pr)
+    zweig = pr.get("zweig") or "main"
+    stand = _pakete_zweig_sha(repo, token)
+    seit = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 60))   # Uhren dürfen etwas abweichen
+    try:
+        _gh(f"/repos/{repo}/actions/workflows/{PAKETE_WORKFLOW}/dispatches", token, "POST", {"ref": zweig})
+    except GitHubFehler as e:
+        if e.code == 404:
+            raise ValueError(f"Die Action {PAKETE_WORKFLOW} gibt es in {repo} (Zweig {zweig}) nicht, oder das Token darf "
+                             "sie nicht sehen.") from None
+        if e.code == 403:
+            raise ValueError(f"Das Token darf die Action nicht starten - auf GitHub für {repo} zusätzlich die Berechtigung "
+                             "„Actions: Read and write“ geben.") from None
+        if e.code == 422:
+            raise ValueError(f"Die Action {PAKETE_WORKFLOW} lässt sich nicht von Hand starten (workflow_dispatch fehlt).") from None
+        raise
+    return {"seit": seit, "stand": stand}
+
+
+def pakete_bau_status(pr, token, seit, stand_vorher):
+    """Lauf der Action seit `seit` -> {"zustand", "schritt", "url", "neu"}.
+    zustand: wartet, laeuft, fertig, fehlgeschlagen. neu: der Zweig „pakete“ hat sich
+    seit dem Start geändert (also liegt eine neue Liste bereit)."""
+    repo = _pakete_repo(pr)
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", str(seit or "")):
+        raise ValueError("Ungültiger Startzeitpunkt.")
+    d = _gh(f"/repos/{repo}/actions/workflows/{PAKETE_WORKFLOW}/runs?event=workflow_dispatch&per_page=10", token,
+            timeout=20)
+    laeufe = [r for r in (d or {}).get("workflow_runs") or [] if str(r.get("created_at") or "") >= seit]
+    if not laeufe:
+        return {"zustand": "wartet", "schritt": "", "url": "", "neu": False}
+    lauf = min(laeufe, key=lambda r: str(r.get("created_at") or ""))   # der erste nach dem Start
+    url = str(lauf.get("html_url") or "")
+    if not re.fullmatch(rf"https://github\.com/{re.escape(repo)}/actions/runs/\d+", url, re.I):
+        url = ""
+    status, schritt = lauf.get("status"), ""
+    if status != "completed":
+        zustand = "wartet" if status in ("queued", "waiting", "requested", "pending") else "laeuft"
+        try:
+            jobs = (_gh(f"/repos/{repo}/actions/runs/{int(lauf['id'])}/jobs", token, timeout=20) or {}).get("jobs") or []
+            for job in jobs:
+                aktiv = next((st for st in job.get("steps") or [] if st.get("status") == "in_progress"), None)
+                if aktiv:
+                    schritt = f"{job.get('name')}: {aktiv.get('name')}"[:120]
+                    break
+        except (ValueError, KeyError, TypeError):
+            pass
+        return {"zustand": zustand, "schritt": schritt, "url": url, "neu": False}
+    zustand = "fertig" if lauf.get("conclusion") == "success" else "fehlgeschlagen"
+    neu = zustand == "fertig" and _pakete_zweig_sha(repo, token) not in ("", str(stand_vorher or ""))
+    return {"zustand": zustand, "schritt": "", "url": url, "neu": neu}
+
+
 def _version_tupel(v):
     m = _VERSION_RE.match(str(v or ""))
     return tuple(int(x) for x in m.groups()) if m else None
@@ -2596,6 +2674,12 @@ def aktion(name, p):
             raise ValueError("Dazu wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
         st = pakete_stand(pr, token)
         return {k: st[k] for k in ("version", "summe", "unterschiede", "seit_signiert", "bereits", "cloudflared", "debian")}
+    if name in ("pakete_bau_starten", "pakete_bau_status"):
+        if not token:
+            raise ValueError("Dazu wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
+        if name == "pakete_bau_starten":
+            return pakete_bau_starten(pr, token)
+        return pakete_bau_status(pr, token, str(p.get("seit") or ""), str(p.get("stand") or ""))
     if name == "pakete_signieren":
         if not token:
             raise ValueError("Dazu wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
@@ -2948,7 +3032,9 @@ Version __VERSION__ <button class="zweit info" id="info-knopf" title="Handbuch (
   <div class="zeile" style="margin-top:12px"><button id="s-github">Von GitHub laden, signieren und hochladen</button></div>
   <div class="hinweis" id="s-github-info" style="margin-top:6px"></div>
   <div id="s-pakete" class="versteckt" style="margin-top:12px"><button class="zweit" id="s-pakete-pruefen">Paketliste prüfen</button>
+   <button class="zweit" id="s-pakete-bauen">Neue Paketliste erstellen lassen</button>
    <span class="hinweis">neuere Python-Pakete vom Zweig „pakete“ (ohne neue Programmversion)</span>
+   <div id="s-pakete-bau" class="hinweis" style="margin-top:6px"></div>
    <div id="s-pakete-info" class="hinweis" style="margin-top:6px"></div>
    <div class="zeile versteckt" id="s-pakete-los-zeile" style="margin-top:6px"><button id="s-pakete-los">Paketliste signieren und hochladen</button></div></div>
   <details style="margin-top:14px"><summary class="hinweis">… oder einen Ordner auf diesem Rechner signieren</summary>
@@ -3006,7 +3092,7 @@ Version __VERSION__ <button class="zweit info" id="info-knopf" title="Handbuch (
  <div class="karte"><h2>GitHub-Zugang</h2>
   <div class="hinweis">Zum Hochladen von SIGNATUR.json braucht das Werkzeug ein Token: GitHub → Settings → Developer settings →
   Fine-grained tokens → „Generate new token“ → Repository access: nur die betroffenen Repositories → Permissions:
-  <b>Contents: Read and write</b>. Unter Windows wird es mit DPAPI verschlüsselt (nur für deinen Windows-Benutzer lesbar),
+  <b>Contents: Read and write</b> (für „Neue Paketliste erstellen lassen“ beim Dashboard zusätzlich <b>Actions: Read and write</b>). Unter Windows wird es mit DPAPI verschlüsselt (nur für deinen Windows-Benutzer lesbar),
   sonst im Schlüsselbund des Betriebssystems - gibt es keinen sicheren Speicher, gilt es nur für diese Sitzung.</div>
   <div class="status fehler versteckt" id="g-klartext">⚠️ Das gespeicherte Token liegt aus einer älteren Version nur
   Base64-kodiert in profile.json - das ist <b>keine Verschlüsselung</b>. <div class="zeile" style="margin-top:8px">
@@ -3116,8 +3202,41 @@ function profilInfo() {
   $("s-github-info").textContent = p ? (p.repo ? `Repository ${p.repo}, Zweig ${p.zweig || "main"}` : "Im Profil ist kein GitHub-Repository eingetragen.") : "";
   $("s-pakete").classList.toggle("versteckt", !(p && p.regel === "speedrace" && p.repo));
   $("s-pakete-info").innerHTML = ""; $("s-pakete-los-zeile").classList.add("versteckt"); paketeSumme = "";
+  if (paketeBau && (!p || p.id !== paketeBau.id)) { clearInterval(paketeBau.timer); paketeBau = null; $("s-pakete-bau").innerHTML = ""; }
 }
 let paketeSumme = "";   // genau die angezeigte Liste wird signiert
+let paketeBau = null;   // laufende Action „Paketliste“: {id, seit, stand, bis, timer}
+function paketeBauZeigen(d) {
+  const link = d.url ? ` <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Lauf öffnen</a>` : "";
+  const t = {wartet: "⏳ Die Action wartet auf einen Rechner bei GitHub …",
+    laeuft: "⏳ Die Action läuft" + (d.schritt ? " – " + esc(d.schritt) : "") + " … (Tests mit der neuen Liste, oft 10–30 Minuten)",
+    fehlgeschlagen: "❌ Die Action ist fehlgeschlagen – Einzelheiten im Lauf.",
+    fertig: d.neu ? "✅ Neue Paketliste liegt bereit – jetzt „Paketliste prüfen“."
+      : "ℹ️ Fertig, aber keine neue Liste auf „pakete“: keine neueren Pakete, oder ein Test war rot (dann gibt es ein Issue im Repository)."};
+  $("s-pakete-bau").innerHTML = (t[d.zustand] || "") + link;
+  $("s-pakete-pruefen").classList.toggle("hervor", d.zustand === "fertig" && d.neu);
+}
+async function paketeBauAbfragen() {
+  const b = paketeBau; if (!b) return;
+  try {
+    const d = await api("pakete_bau_status", {id: b.id, seit: b.seit, stand: b.stand}); if (paketeBau !== b) return;
+    paketeBauZeigen(d);
+    if (["fertig", "fehlgeschlagen"].includes(d.zustand) || Date.now() > b.bis) { clearInterval(b.timer); paketeBau = null; }
+  } catch (e) { if (paketeBau === b) { $("s-pakete-bau").textContent = "❌ " + e.message; clearInterval(b.timer); paketeBau = null; } }
+}
+$("s-pakete-bauen").onclick = e => {
+  const p = Z.profile.find(x => x.id === $("s-profil").value);
+  if (!p) return;
+  if (!confirm(`Die Action „paketliste.yml“ in ${p.repo} starten? Sie baut aus der zuletzt signierten Version eine neue Paketliste und testet sie. Signiert wird danach nur, was du prüfst und bestätigst.`)) return;
+  mit("s-status", e.target, "Starte die Action …", async () => {
+    const d = await api("pakete_bau_starten", {id: p.id});
+    if (paketeBau) clearInterval(paketeBau.timer);
+    paketeBau = {id: p.id, seit: d.seit, stand: d.stand, bis: Date.now() + 90 * 60 * 1000};
+    paketeBau.timer = setInterval(paketeBauAbfragen, 20000);
+    paketeBauZeigen({zustand: "wartet"}); setTimeout(paketeBauAbfragen, 8000);
+    status("s-status", "ok", "✅ Action gestartet. Der Fortschritt steht unter „Paketliste prüfen“.");
+  });
+};
 $("s-pakete-pruefen").onclick = e => mit("s-status", e.target, "Lade die Paketliste …", async () => {
   const p = Z.profile.find(x => x.id === $("s-profil").value);   // nur der öffentliche Schlüssel wird gebraucht
   if (!p || !p.oeffentlich) throw new Error("Das Profil hat noch keinen Schlüssel (Reiter „Profile & Schlüssel“).");
