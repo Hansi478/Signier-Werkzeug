@@ -290,6 +290,16 @@ benutzt.
     updates“ eingeschaltet sind.
 - **Beheben (Herausgeber):** Pull Request bzw. Versionsnummer anheben, Tests
   abwarten, zusammenführen, `VERSION` erhöhen, im Werkzeug „Bau starten“.
+  Im Werkzeug (Reiter „GitHub“, „Wartung“): „Wartung prüfen“ zeigt die letzte
+  Sicherheitsprüfung, offene Dependabot-Warnungen und die offenen Vorschläge von
+  Dependabot mit ihren Testergebnissen. „Übernehmen“ gibt es nur, wenn ein
+  Vorschlag ausschließlich `requirements-bau.txt`-Zeilen `name==version` mit
+  `--hash=sha256:` bzw. Workflow-Zeilen `uses: …@<40 hex>` ändert, alle Tests grün
+  sind und GitHub ihn ohne Konflikt zusammenführen kann. Zusammengeführt wird genau
+  der angezeigte Stand (Commit-SHA wird mitgeschickt), danach startet die
+  Sicherheitsprüfung. Nie automatisch: Was übernommen ist, kommt beim nächsten Bau
+  in die exe und wird mitsigniert. Das Token braucht dafür „Actions“, „Pull
+  requests“, „Workflows“ (je Read and write) und „Dependabot alerts: Read“.
 - **Signieren (Herausgeber, nur lokal):** im Werkzeug „Neuen Entwurf signieren
   und veröffentlichen“. Der Schlüssel liegt nie bei GitHub.
 - **Verteilen (automatisch):** Jede Installation bietet beim Start das Update an.

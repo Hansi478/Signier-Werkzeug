@@ -319,6 +319,16 @@ th{background:#f1f5f9}tr{break-inside:avoid}
   <li>„Bau starten (Tag setzen)“: setzt <span class="mono">v&lt;Version&gt;</span> auf <span class="mono">main</span>; GitHub baut die exe (feste Paketversionen, Tests, Selbsttest, Herkunftsnachweis) und legt einen <b>Entwurf</b> an. Fortschritt: „Bau-Status prüfen“.</li>
   <li>„Neuen Entwurf signieren und veröffentlichen“ → Kennwort: prüft die Herkunft der exe (Prüfsumme aus dem Bau, Tag auf dem gebauten Commit, Commit auf main), signiert sie und veröffentlicht das Release. Erst dann sehen andere Installationen das Update.</li>
  </ol>
+ <h3>Wartung</h3>
+ <p>Jeden Montag prüft GitHub die Bau-Pakete auf bekannte Schwachstellen; Dependabot schlägt neuere Paket- und
+ Action-Versionen vor. Im selben Bereich:</p>
+ <ul>
+  <li><b>„Wartung prüfen“</b> zeigt das Ergebnis der letzten Sicherheitsprüfung, offene Warnungen (Paket, betroffene und behobene Version) und jeden Vorschlag mit seinen Änderungen (z. B. „setuptools 84.0.0 → 84.2.1“) und Tests.</li>
+  <li><b>„Übernehmen…“</b> erscheint nur, wenn der Vorschlag nichts anderes ändert als Paketversionen mit Prüfsummen bzw. Actions auf festen Commit-SHAs und alle Tests grün sind. Danach startet die Sicherheitsprüfung von selbst. In die exe kommt es mit der nächsten Version.</li>
+  <li><b>„Schließen…“</b> für einen Vorschlag, den ein anderer ersetzt.</li>
+  <li><b>„Sicherheitsprüfung starten“</b> prüft sofort statt erst am Montag.</li>
+ </ul>
+ <div class="kasten">Übernommen wird nie automatisch: Was du übernimmst, landet in der nächsten exe und wird mit deinem Schlüssel signiert. Das Token braucht dafür zusätzlich „Actions“, „Pull requests“, „Workflows“ (je Read and write) und „Dependabot alerts: Read“.</div>
 </section>
 
 <!-- ===================== 11 ===================== -->

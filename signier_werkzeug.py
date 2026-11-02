@@ -1814,7 +1814,7 @@ def pakete_bau_starten(pr, token):
     repo = _pakete_repo(pr)
     zweig = pr.get("zweig") or "main"
     stand = _pakete_zweig_sha(repo, token)
-    seit = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 60))   # Uhren dürfen etwas abweichen
+    seit = _jetzt_utc_seit()
     try:
         _gh(f"/repos/{repo}/actions/workflows/{PAKETE_WORKFLOW}/dispatches", token, "POST", {"ref": zweig})
     except GitHubFehler as e:
@@ -1830,38 +1830,219 @@ def pakete_bau_starten(pr, token):
     return {"seit": seit, "stand": stand}
 
 
+def _lauf_url(repo, lauf):
+    url = str((lauf or {}).get("html_url") or "")
+    return url if re.fullmatch(rf"https://github\.com/{re.escape(repo)}/actions/runs/\d+", url, re.I) else ""
+
+
+def _lauf_zustand(repo, token, lauf):
+    """Ein Lauf einer Action -> {"zustand": wartet|laeuft|fertig|fehlgeschlagen, "schritt", "url"}."""
+    status, schritt = lauf.get("status"), ""
+    if status == "completed":
+        return {"zustand": "fertig" if lauf.get("conclusion") == "success" else "fehlgeschlagen", "schritt": "",
+                "url": _lauf_url(repo, lauf)}
+    try:
+        jobs = (_gh(f"/repos/{repo}/actions/runs/{int(lauf['id'])}/jobs", token, timeout=20) or {}).get("jobs") or []
+        for job in jobs:
+            aktiv = next((st for st in job.get("steps") or [] if st.get("status") == "in_progress"), None)
+            if aktiv:
+                schritt = f"{job.get('name')}: {aktiv.get('name')}"[:120]
+                break
+    except (ValueError, KeyError, TypeError):
+        pass
+    return {"zustand": "wartet" if status in ("queued", "waiting", "requested", "pending") else "laeuft",
+            "schritt": schritt, "url": _lauf_url(repo, lauf)}
+
+
+def _lauf_seit(repo, token, workflow, seit):
+    """Erster von Hand gestarteter Lauf der Action `workflow` seit `seit` (UTC) -> wie _lauf_zustand."""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", str(seit or "")):
+        raise ValueError("Ungültiger Startzeitpunkt.")
+    d = _gh(f"/repos/{repo}/actions/workflows/{workflow}/runs?event=workflow_dispatch&per_page=10", token, timeout=20)
+    laeufe = [r for r in (d or {}).get("workflow_runs") or [] if str(r.get("created_at") or "") >= seit]
+    if not laeufe:
+        return {"zustand": "wartet", "schritt": "", "url": ""}
+    return _lauf_zustand(repo, token, min(laeufe, key=lambda r: str(r.get("created_at") or "")))   # der erste nach dem Start
+
+
+def _jetzt_utc_seit():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 60))   # Uhren dürfen etwas abweichen
+
+
 def pakete_bau_status(pr, token, seit, stand_vorher):
     """Lauf der Action seit `seit` -> {"zustand", "schritt", "url", "neu"}.
     zustand: wartet, laeuft, fertig, fehlgeschlagen. neu: der Zweig „pakete“ hat sich
     seit dem Start geändert (also liegt eine neue Liste bereit)."""
     repo = _pakete_repo(pr)
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", str(seit or "")):
-        raise ValueError("Ungültiger Startzeitpunkt.")
-    d = _gh(f"/repos/{repo}/actions/workflows/{PAKETE_WORKFLOW}/runs?event=workflow_dispatch&per_page=10", token,
-            timeout=20)
-    laeufe = [r for r in (d or {}).get("workflow_runs") or [] if str(r.get("created_at") or "") >= seit]
+    erg = _lauf_seit(repo, token, PAKETE_WORKFLOW, seit)
+    erg["neu"] = erg["zustand"] == "fertig" and _pakete_zweig_sha(repo, token) not in ("", str(stand_vorher or ""))
+    return erg
+
+
+# ---------------------------------------------------------------------------
+# Wartung des Werkzeugs: Sicherheitsprüfung und Dependabot-Vorschläge. Übernommen
+# wird nur auf Knopfdruck und nur, was das Werkzeug vorher genau anzeigen kann:
+# Paketversionen in requirements-bau.txt (mit Prüfsummen) bzw. Actions auf
+# vollständigen Commit-SHAs - was übernommen ist, landet beim nächsten Bau in der exe.
+# ---------------------------------------------------------------------------
+SICHERHEIT_WORKFLOW = "sicherheit.yml"
+_WARTUNG_DATEIEN = re.compile(r"requirements-bau\.txt|\.github/workflows/[A-Za-z0-9._-]+\.ya?ml")
+_REQ_ZEILE = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9._+!-]+)((?: --hash=sha256:[0-9a-f]{64})+)")
+_USES_ZEILE = re.compile(r"\s*(?:- )?uses: ([A-Za-z0-9._-]+/[A-Za-z0-9._/-]+)@([0-9a-f]{40})(?: # (\S+))?")
+
+
+def _rechte_fehler(e, was, recht):
+    if isinstance(e, GitHubFehler) and e.code in (403, 404):
+        return ValueError(f"{was} ging nicht: Das Token braucht für {WERKZEUG_REPO} zusätzlich „{recht}“.")
+    return e
+
+
+def wartung_aenderungen(dateien):
+    """Dateien eines Dependabot-PRs (GitHub-API) -> (Änderungen als Text, Grund oder "").
+    Erlaubt sind nur requirements-bau.txt-Zeilen „name==version --hash=sha256:…“ und
+    Workflow-Zeilen „uses: owner/action@<40 hex> # vX“ - alles andere: Grund."""
+    alt, neu, gruende = {}, {}, []
+    for f in dateien or []:
+        name, patch = str(f.get("filename") or ""), f.get("patch")
+        if not _WARTUNG_DATEIEN.fullmatch(name) or f.get("status") not in ("modified",):
+            gruende.append(f"ändert {name or '?'}")
+            continue
+        if not isinstance(patch, str):
+            gruende.append(f"{name}: Änderung nicht lesbar")
+            continue
+        for zeile in patch.split("\n"):
+            if zeile[:1] not in ("+", "-") or zeile[:3] in ("+++", "---"):
+                continue
+            inhalt, ziel = zeile[1:], (alt if zeile[0] == "-" else neu)
+            if name == "requirements-bau.txt":
+                m = _REQ_ZEILE.fullmatch(inhalt.strip())
+                if m:
+                    ziel[m.group(1).lower()] = m.group(2)
+                    continue
+            else:
+                m = _USES_ZEILE.fullmatch(inhalt.rstrip())
+                if m:
+                    ziel[m.group(1)] = f"{m.group(3) or '?'} ({m.group(2)[:7]})"
+                    continue
+            gruende.append(f"{name}: andere Änderung ({inhalt.strip()[:60]})")
+    texte = [f"{k} {alt.get(k, '(neu)')} → {neu[k]}" for k in sorted(neu) if alt.get(k) != neu[k]]
+    texte += [f"{k} {alt[k]} (entfällt)" for k in sorted(set(alt) - set(neu))]
+    if not texte and not gruende:
+        gruende.append("keine erkennbare Änderung")
+    return texte, "; ".join(gruende[:3])
+
+
+def _tests_gruen(token, sha):
+    d = _gh(f"/repos/{WERKZEUG_REPO}/commits/{sha}/check-runs?per_page=100", token, timeout=20) or {}
+    laeufe = d.get("check_runs") or []
     if not laeufe:
-        return {"zustand": "wartet", "schritt": "", "url": "", "neu": False}
-    lauf = min(laeufe, key=lambda r: str(r.get("created_at") or ""))   # der erste nach dem Start
-    url = str(lauf.get("html_url") or "")
-    if not re.fullmatch(rf"https://github\.com/{re.escape(repo)}/actions/runs/\d+", url, re.I):
+        return "keine Tests"
+    if any(r.get("status") != "completed" for r in laeufe):
+        return "laufen noch"
+    schlecht = [str(r.get("name")) for r in laeufe if r.get("conclusion") not in ("success", "skipped", "neutral")]
+    return ("rot: " + ", ".join(schlecht[:3])) if schlecht else "grün"
+
+
+def _wartung_pr(token, pr_kurz):
+    """Ein offener Dependabot-PR -> Anzeige mit „uebernehmbar“ und Grund."""
+    nr = int(pr_kurz["number"])
+    pr = _gh(f"/repos/{WERKZEUG_REPO}/pulls/{nr}", token, timeout=20) or {}
+    sha = str((pr.get("head") or {}).get("sha") or "")
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise ValueError("Unerwartete Antwort von GitHub (Pull Request).")
+    texte, grund = wartung_aenderungen(_gh(f"/repos/{WERKZEUG_REPO}/pulls/{nr}/files?per_page=100", token, timeout=20))
+    tests = _tests_gruen(token, sha)
+    if not grund and tests != "grün":
+        grund = f"Tests {tests}"
+    if not grund and pr.get("mergeable") is False:
+        grund = "Konflikt mit main – Dependabot muss den Vorschlag erneuern („@dependabot rebase“)"
+    url = str(pr.get("html_url") or "")
+    if not re.fullmatch(rf"https://github\.com/{re.escape(WERKZEUG_REPO)}/pull/\d+", url, re.I):
         url = ""
-    status, schritt = lauf.get("status"), ""
-    if status != "completed":
-        zustand = "wartet" if status in ("queued", "waiting", "requested", "pending") else "laeuft"
-        try:
-            jobs = (_gh(f"/repos/{repo}/actions/runs/{int(lauf['id'])}/jobs", token, timeout=20) or {}).get("jobs") or []
-            for job in jobs:
-                aktiv = next((st for st in job.get("steps") or [] if st.get("status") == "in_progress"), None)
-                if aktiv:
-                    schritt = f"{job.get('name')}: {aktiv.get('name')}"[:120]
-                    break
-        except (ValueError, KeyError, TypeError):
-            pass
-        return {"zustand": zustand, "schritt": schritt, "url": url, "neu": False}
-    zustand = "fertig" if lauf.get("conclusion") == "success" else "fehlgeschlagen"
-    neu = zustand == "fertig" and _pakete_zweig_sha(repo, token) not in ("", str(stand_vorher or ""))
-    return {"zustand": zustand, "schritt": "", "url": url, "neu": neu}
+    return {"nummer": nr, "titel": str(pr.get("title") or "")[:160], "sha": sha, "aenderungen": texte[:30],
+            "tests": tests, "uebernehmbar": not grund, "grund": grund, "url": url}
+
+
+def wartung_stand(token):
+    """Letzte Sicherheitsprüfung, offene Dependabot-Warnungen und -Vorschläge."""
+    erg = {"pruefung": None, "warnungen": [], "warnungen_fehler": "", "vorschlaege": []}
+    d = _gh(f"/repos/{WERKZEUG_REPO}/actions/workflows/{SICHERHEIT_WORKFLOW}/runs?per_page=1", None, timeout=20)
+    lauf = ((d or {}).get("workflow_runs") or [None])[0]
+    if lauf:
+        erg["pruefung"] = {**_lauf_zustand(WERKZEUG_REPO, None, lauf), "zeit": str(lauf.get("created_at") or "")[:16]}
+    try:
+        for w in _gh(f"/repos/{WERKZEUG_REPO}/dependabot/alerts?state=open&per_page=30", token, timeout=20) or []:
+            v, a = w.get("security_vulnerability") or {}, w.get("security_advisory") or {}
+            erg["warnungen"].append({"paket": str((v.get("package") or {}).get("name") or "?")[:60],
+                                     "schwere": str(a.get("severity") or "")[:20],
+                                     "betroffen": str(v.get("vulnerable_version_range") or "")[:60],
+                                     "behoben": str((v.get("first_patched_version") or {}).get("identifier") or "")[:30],
+                                     "text": str(a.get("summary") or "")[:200]})
+    except GitHubFehler as e:
+        erg["warnungen_fehler"] = ("Warnungen nicht lesbar – das Token braucht „Dependabot alerts: Read“."
+                                   if e.code in (403, 404) else str(e))
+    try:
+        prs = _gh(f"/repos/{WERKZEUG_REPO}/pulls?state=open&per_page=30", token, timeout=20) or []
+    except GitHubFehler as e:
+        raise _rechte_fehler(e, "Vorschläge lesen", "Pull requests: Read and write") from None
+    for pr in prs:
+        if (pr.get("user") or {}).get("login") == "dependabot[bot]":
+            erg["vorschlaege"].append(_wartung_pr(token, pr))
+    return erg
+
+
+def wartung_pruefung_starten(token):
+    seit = _jetzt_utc_seit()
+    try:
+        _gh(f"/repos/{WERKZEUG_REPO}/actions/workflows/{SICHERHEIT_WORKFLOW}/dispatches", token, "POST", {"ref": "main"})
+    except GitHubFehler as e:
+        raise _rechte_fehler(e, "Die Sicherheitsprüfung starten", "Actions: Read and write") from None
+    return {"seit": seit}
+
+
+def wartung_pruefung_status(token, seit):
+    return _lauf_seit(WERKZEUG_REPO, token, SICHERHEIT_WORKFLOW, seit)
+
+
+def wartung_uebernehmen(token, nummer, sha):
+    """Dependabot-PR übernehmen - nur genau den angezeigten Stand (sha) und nur,
+    wenn er noch alle Bedingungen erfüllt. Danach die Sicherheitsprüfung starten."""
+    v = _wartung_pr(token, {"number": int(nummer)})
+    if v["sha"] != sha:
+        raise ValueError("Der Vorschlag hat sich seit der Anzeige geändert - bitte „Wartung prüfen“ und erneut ansehen.")
+    if not v["uebernehmbar"]:
+        raise ValueError(f"Nicht übernommen: {v['grund']}.")
+    try:
+        _gh(f"/repos/{WERKZEUG_REPO}/pulls/{int(nummer)}/merge", token, "PUT",
+            {"sha": sha, "merge_method": "squash", "commit_title": f"{v['titel']} (#{int(nummer)})"})
+    except GitHubFehler as e:
+        if e.code == 409:
+            raise ValueError("Der Vorschlag hat sich geändert - bitte „Wartung prüfen“.") from None
+        if e.code == 405:
+            raise ValueError("GitHub lässt das Zusammenführen nicht zu (Konflikt mit main oder eine Regel des "
+                             "Repositorys) - auf GitHub nachsehen.") from None
+        raise _rechte_fehler(e, "Übernehmen", "Pull requests: Read and write“ (bei Workflow-Dateien auch „Workflows: "
+                             "Read and write") from None
+    try:
+        start = wartung_pruefung_starten(token)
+    except ValueError:
+        start = None
+    return {"ok": True, "pruefung": start,
+            "meldung": f"Vorschlag #{int(nummer)} übernommen: " + "; ".join(v["aenderungen"][:6])
+            + (". Die Sicherheitsprüfung läuft." if start else ". Die Sicherheitsprüfung bitte von Hand starten.")
+            + " In die exe kommt es mit der nächsten Version."}
+
+
+def wartung_schliessen(token, nummer):
+    nr = int(nummer)
+    pr = _gh(f"/repos/{WERKZEUG_REPO}/pulls/{nr}", token, timeout=20) or {}
+    if (pr.get("user") or {}).get("login") != "dependabot[bot]" or pr.get("state") != "open":
+        raise ValueError("Geschlossen werden nur offene Vorschläge von Dependabot.")
+    try:
+        _gh(f"/repos/{WERKZEUG_REPO}/pulls/{nr}", token, "PATCH", {"state": "closed"})
+    except GitHubFehler as e:
+        raise _rechte_fehler(e, "Schließen", "Pull requests: Read and write") from None
+    return {"ok": True, "meldung": f"Vorschlag #{nr} geschlossen."}
 
 
 def _version_tupel(v):
@@ -2608,7 +2789,9 @@ def aktion(name, p):
             pr = dict(pr)
         else:
             pr = _profil(d, p.get("id")) if name not in ("update_suchen", "update_einspielen", "werkzeug_bau_starten",
-                                                         "werkzeug_bau_status", "werkzeug_entwurf_info") else None
+                                                         "werkzeug_bau_status", "werkzeug_entwurf_info", "wartung_stand",
+                                                         "wartung_pruefung_starten", "wartung_pruefung_status",
+                                                         "wartung_uebernehmen", "wartung_schliessen") else None
         token = geheim_lesen(d.get("github_token"))
     if name == "update_suchen":
         version, _rel = werkzeug_neueste()
@@ -2627,6 +2810,19 @@ def aktion(name, p):
                                        "(einige Minuten), danach hier „Neuen Entwurf signieren und veröffentlichen“."}
     if name == "werkzeug_bau_status":
         return werkzeug_bau_status(token)
+    if name.startswith("wartung_"):
+        if not token:
+            raise ValueError("Dazu wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
+        if name == "wartung_stand":
+            return wartung_stand(token)
+        if name == "wartung_pruefung_starten":
+            return wartung_pruefung_starten(token)
+        if name == "wartung_pruefung_status":
+            return wartung_pruefung_status(token, str(p.get("seit") or ""))
+        if name == "wartung_uebernehmen":
+            return wartung_uebernehmen(token, int(p.get("nummer") or 0), str(p.get("sha") or ""))
+        if name == "wartung_schliessen":
+            return wartung_schliessen(token, int(p.get("nummer") or 0))
     if name == "werkzeug_entwurf_info":
         if not token:
             raise ValueError("Zum Veröffentlichen wird ein GitHub-Token gebraucht (Reiter „GitHub“).")
@@ -3108,7 +3304,14 @@ Version __VERSION__ <button class="zweit info" id="info-knopf" title="Handbuch (
   <button class="zweit" id="w-bauen">Bau starten (Tag setzen)</button>
   <button class="zweit" id="w-baustatus">Bau-Status prüfen</button>
   <button id="w-veroeff">Neuen Entwurf signieren und veröffentlichen</button></div>
-  <div class="status" id="w-status"></div></div>
+  <div class="status" id="w-status"></div>
+  <h2 style="margin-top:16px">Wartung</h2>
+  <div class="hinweis">Wöchentliche Sicherheitsprüfung der Bau-Pakete und Vorschläge von Dependabot. Übernommen wird nur auf
+  Knopfdruck und nur, was hier genau angezeigt wird – es kommt mit der nächsten Version in die exe. Das Token braucht dafür
+  zusätzlich „Actions“, „Pull requests“ (je Read and write), „Workflows: Read and write“ und „Dependabot alerts: Read“.</div>
+  <div class="zeile" style="margin-top:10px"><button class="zweit" id="m-stand">Wartung prüfen</button>
+  <button class="zweit" id="m-pruefen">Sicherheitsprüfung starten</button></div>
+  <div id="m-inhalt" style="margin-top:8px"></div><div class="status" id="m-status"></div></div>
 </section>
 
 <section id="r-qnap" class="versteckt">
@@ -3464,6 +3667,61 @@ $("w-veroeff").onclick = async e => {
   mit("w-status", e.target, "Lade Entwurf, signiere und veröffentliche …", async () => {
     const d = await api("werkzeug_veroeffentlichen", {kennwort: kw}); $("w-veroeff").classList.remove("hervor"); status("w-status", "ok", "✅ " + esc(d.meldung)); });
 };
+// ---- Wartung des Werkzeugs ------------------------------------------------
+let mPruefung = null;   // {seit, bis, timer}
+function wartungZeigen(d) {
+  const p = d.pruefung, link = u => u ? ` <a href="${esc(u)}" target="_blank" rel="noopener noreferrer">Lauf öffnen</a>` : "";
+  const PZ = {wartet: "⏳ wartet", laeuft: "⏳ läuft", fertig: "✅ ohne Befund", fehlgeschlagen: "❌ mit Befund (Einzelheiten im Lauf)"};
+  let h = `<div><b>Letzte Sicherheitsprüfung:</b> ${p ? esc(p.zeit.replace("T", " ")) + " UTC – " + (PZ[p.zustand] || "") + link(p.url) : "noch keine"}</div>`;
+  if (d.warnungen_fehler) h += `<div class="hinweis">${esc(d.warnungen_fehler)}</div>`;
+  h += d.warnungen.length ? "<div style='margin-top:6px'><b>Offene Warnungen:</b><ul>" + d.warnungen.map(w =>
+      `<li><span class="mono">${esc(w.paket)}</span> (${esc(w.schwere)}): betroffen ${esc(w.betroffen)}, behoben in ${esc(w.behoben || "–")} – ${esc(w.text)}</li>`).join("") + "</ul></div>"
+    : (d.warnungen_fehler ? "" : "<div style='margin-top:6px'>Keine offenen Warnungen.</div>");
+  h += d.vorschlaege.length ? "<div style='margin-top:6px'><b>Vorschläge von Dependabot:</b></div>" + d.vorschlaege.map(v =>
+      `<div class="karte" style="margin:6px 0;padding:10px"><b>#${v.nummer}</b> ${esc(v.titel)}${v.url ? ` <a href="${esc(v.url)}" target="_blank" rel="noopener noreferrer">ansehen</a>` : ""}
+       <div class="hinweis">Tests: ${esc(v.tests)}</div><ul>${v.aenderungen.map(t => `<li class="mono">${esc(t)}</li>`).join("")}</ul>
+       ${v.uebernehmbar ? "" : `<div class="hinweis">⚠️ Nicht per Knopf übernehmbar: ${esc(v.grund)}</div>`}
+       <div class="zeile" style="margin-top:6px">${v.uebernehmbar ? `<button data-muebern="${v.nummer}">Übernehmen…</button>` : ""}
+       <button class="zweit" data-mschliess="${v.nummer}">Schließen…</button></div></div>`).join("")
+    : "<div style='margin-top:6px'>Keine offenen Vorschläge.</div>";
+  $("m-inhalt").innerHTML = h;
+  document.querySelectorAll("[data-muebern]").forEach(b => b.onclick = () => {
+    const v = d.vorschlaege.find(x => x.nummer === +b.dataset.muebern);
+    if (!confirm(`Vorschlag #${v.nummer} übernehmen?\n\n${v.aenderungen.join("\n")}\n\nEr kommt mit der nächsten Version in die exe. Danach startet die Sicherheitsprüfung.`)) return;
+    mit("m-status", b, "Übernehme …", async () => {
+      const r = await api("wartung_uebernehmen", {nummer: v.nummer, sha: v.sha});
+      status("m-status", "ok", "✅ " + esc(r.meldung));
+      if (r.pruefung) mPruefungBeobachten(r.pruefung.seit);
+      wartungZeigen(await api("wartung_stand"));
+    });
+  });
+  document.querySelectorAll("[data-mschliess]").forEach(b => b.onclick = () => {
+    if (!confirm(`Vorschlag #${b.dataset.mschliess} schließen (z. B. weil ein anderer ihn ersetzt)? Dependabot schlägt ihn dann nicht erneut vor.`)) return;
+    mit("m-status", b, "Schließe …", async () => {
+      const r = await api("wartung_schliessen", {nummer: +b.dataset.mschliess});
+      status("m-status", "ok", "✅ " + esc(r.meldung)); wartungZeigen(await api("wartung_stand"));
+    });
+  });
+}
+function mPruefungBeobachten(seit) {
+  if (mPruefung) clearInterval(mPruefung.timer);
+  const m = mPruefung = {seit, bis: Date.now() + 30 * 60 * 1000};
+  const abfragen = async () => {
+    try {
+      const d = await api("wartung_pruefung_status", {seit}); if (mPruefung !== m) return;
+      const link = d.url ? ` <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Lauf öffnen</a>` : "";
+      const t = {wartet: "⏳ Sicherheitsprüfung wartet auf einen Rechner …", laeuft: "⏳ Sicherheitsprüfung läuft" + (d.schritt ? " – " + esc(d.schritt) : "") + " …",
+        fertig: "✅ Sicherheitsprüfung ohne Befund.", fehlgeschlagen: "❌ Sicherheitsprüfung mit Befund – Einzelheiten im Lauf."}[d.zustand];
+      status("m-status", d.zustand === "fehlgeschlagen" ? "fehler" : d.zustand === "fertig" ? "ok" : "laeuft", t + link);
+      if (["fertig", "fehlgeschlagen"].includes(d.zustand) || Date.now() > m.bis) { clearInterval(m.timer); mPruefung = null; }
+    } catch (e) { if (mPruefung === m) { status("m-status", "fehler", "❌ " + esc(e.message)); clearInterval(m.timer); mPruefung = null; } }
+  };
+  m.timer = setInterval(abfragen, 20000); setTimeout(abfragen, 8000);
+}
+$("m-stand").onclick = e => mit("m-status", e.target, "Frage GitHub …", async () => {
+  wartungZeigen(await api("wartung_stand")); status("m-status", "ok", "✅ Stand geladen."); });
+$("m-pruefen").onclick = e => mit("m-status", e.target, "Starte die Sicherheitsprüfung …", async () => {
+  const d = await api("wartung_pruefung_starten"); status("m-status", "laeuft", "⏳ Gestartet …"); mPruefungBeobachten(d.seit); });
 // ---- QNAP-Begleiter ----------------------------------------------------
 let QZ = null;
 const Q_STATUS = {offen: "offen", laeuft: "läuft – Ergebnis melden", laedt: "lädt und prüft …", erledigt: "erledigt", fehler: "Fehler", uebersprungen: "übersprungen"};
